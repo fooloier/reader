@@ -1,0 +1,62 @@
+name: 构建 Linux amd64
+
+on:
+  push:
+    tags:
+      - '**'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: '0'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: 安装系统依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential clang cmake pkg-config \
+            libfontconfig-dev libwayland-dev libwebkit2gtk-4.1-dev \
+            libxkbcommon-x11-dev libx11-xcb-dev libssl-dev \
+            libzstd-dev libasound2-dev libvulkan1
+
+      - name: 安装 Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add x86_64-unknown-linux-gnu
+
+      - name: 构建
+        run: cargo build --locked --release --bin reader --target x86_64-unknown-linux-gnu
+
+      - name: 打包
+        shell: bash
+        run: |
+          mkdir -p dist/reader-linux-amd64
+          install -m 755 target/x86_64-unknown-linux-gnu/release/reader dist/reader-linux-amd64/reader
+          strip dist/reader-linux-amd64/reader
+          install -m 644 LICENSE README.md dist/reader-linux-amd64/
+          tar -C dist -czf dist/reader-linux-amd64.tar.gz reader-linux-amd64
+          tar -tzf dist/reader-linux-amd64.tar.gz
+
+      - name: 发布 GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" dist/reader-linux-amd64.tar.gz --clobber
+          else
+            gh release create "$RELEASE_TAG" dist/reader-linux-amd64.tar.gz \
+              --verify-tag --title "$RELEASE_TAG" --generate-notes
+          fi

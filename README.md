@@ -23,6 +23,17 @@ cargo run --locked --bin reader
 
 首次启动为空书架。点击文件图标导入 PDF 或 EPUB，或点击文件夹图标批量导入。点击书卡封面或列表书名开始阅读。
 
+## 下载自动构建
+
+推送 tag 后，GitHub Actions 会构建 Linux amd64 版本。在仓库 Releases 页面的对应 tag 下下载 `reader-linux-amd64.tar.gz`：
+
+```sh
+tar -xzf reader-linux-amd64.tar.gz
+./reader-linux-amd64/reader
+```
+
+该版本在 Ubuntu 24.04 上构建，使用系统动态库；运行环境仍需兼容的系统库、图形会话和 Vulkan 驱动。
+
 ## 构建
 
 构建开发版本：
