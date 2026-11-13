@@ -1,16 +1,245 @@
 use crate::{app::ReaderApp, controls::icon};
 use gpui_kit::{
     component::{
+        Size,
         button::{Button, ButtonVariants},
+        menu::{PopupMenu, PopupMenuItem},
+        table::{Column, DataTable, TableDelegate, TableState},
         *,
     },
     prelude::*,
     *,
 };
 use reader_core::{Book, ShelfLayout};
+use std::path::PathBuf;
+
+actions!(
+    shelf,
+    [OpenSelectedBook, RenameSelectedBook, DeleteSelectedBook]
+);
+
+pub(crate) fn init(cx: &mut App) {
+    cx.bind_keys([
+        KeyBinding::new("enter", OpenSelectedBook, Some("Shelf && !Input")),
+        KeyBinding::new("f2", RenameSelectedBook, Some("Shelf && !Input")),
+        KeyBinding::new("delete", DeleteSelectedBook, Some("Shelf && !Input")),
+    ]);
+}
+
+pub(crate) struct ShelfTable {
+    books: Vec<Book>,
+    columns: [Column; 4],
+    owner: WeakEntity<ReaderApp>,
+    cache: PathBuf,
+}
+
+impl ShelfTable {
+    pub(crate) fn new(
+        books: Vec<Book>,
+        owner: WeakEntity<ReaderApp>,
+        cache: PathBuf,
+        window: &Window,
+    ) -> Self {
+        let rem = window.rem_size();
+        Self {
+            books,
+            columns: [
+                Column::new("cover", "封面").width(rems(6.).to_pixels(rem)),
+                Column::new("title", "书名").width(rems(24.).to_pixels(rem)),
+                Column::new("authors", "作者").width(rems(16.).to_pixels(rem)),
+                Column::new("published", "出版年月").width(rems(10.).to_pixels(rem)),
+            ]
+            .map(|column| column.min_width(rems(4.).to_pixels(rem)).movable(false)),
+            owner,
+            cache,
+        }
+    }
+
+    fn text(&self, row_ix: usize, col_ix: usize) -> String {
+        let book = &self.books[row_ix];
+        match col_ix {
+            0 => format!("《{}》封面", book.display_title),
+            1 => book.display_title.clone(),
+            2 if book.metadata.authors.is_empty() => "未知".into(),
+            2 => book.metadata.authors.join("、"),
+            3 => book
+                .metadata
+                .year
+                .map(|year| year.to_string())
+                .unwrap_or_else(|| "未知".into()),
+            _ => unreachable!(),
+        }
+    }
+}
+
+impl TableDelegate for ShelfTable {
+    fn columns_count(&self, _: &App) -> usize {
+        self.columns.len()
+    }
+    fn rows_count(&self, _: &App) -> usize {
+        self.books.len()
+    }
+    fn column(&self, col_ix: usize, _: &App) -> Column {
+        self.columns[col_ix].clone()
+    }
+
+    fn render_tr(
+        &mut self,
+        row_ix: usize,
+        _: &mut Window,
+        _: &mut Context<TableState<Self>>,
+    ) -> Stateful<Div> {
+        div().id(SharedString::from(format!(
+            "book-{}",
+            self.books[row_ix].id.0
+        )))
+    }
+
+    fn render_th(
+        &mut self,
+        col_ix: usize,
+        _: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) -> impl IntoElement {
+        div()
+            .w_full()
+            .text_color(cx.theme().foreground)
+            .child(self.columns[col_ix].name.clone())
+    }
+
+    fn cell_label(&self, row_ix: usize, col_ix: usize, _: &App) -> Option<SharedString> {
+        Some(self.text(row_ix, col_ix).into())
+    }
+
+    fn render_td(
+        &mut self,
+        row_ix: usize,
+        col_ix: usize,
+        _: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) -> impl IntoElement {
+        let book = &self.books[row_ix];
+        let id = book.id;
+        let owner = self.owner.clone();
+        match col_ix {
+            0 => crate::controls::observed(
+                div()
+                    .id(SharedString::from(format!("cover-{}", id.0)))
+                    .relative()
+                    .w_8()
+                    .h_12()
+                    .flex_shrink_0()
+                    .overflow_hidden()
+                    .on_click(move |_, window, cx| {
+                        cx.stop_propagation();
+                        let _ = owner.update(cx, |app, cx| app.open_book(id, window, cx));
+                    })
+                    .child(
+                        book.cover
+                            .as_ref()
+                            .map(|name| {
+                                img(self.cache.join(name))
+                                    .object_fit(ObjectFit::Contain)
+                                    .absolute()
+                                    .size_full()
+                                    .into_any_element()
+                            })
+                            .unwrap_or_else(|| {
+                                div()
+                                    .size_full()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .bg(cx.theme().muted)
+                                    .child(Icon::new(IconName::BookOpen).size_6())
+                                    .into_any_element()
+                            }),
+                    ),
+            ),
+            1 => Button::new(SharedString::from(format!("open-{}", id.0)))
+                .ghost()
+                .w_full()
+                .min_w_0()
+                .px_0()
+                .child(
+                    div()
+                        .w_full()
+                        .min_w_0()
+                        .text_left()
+                        .text_ellipsis()
+                        .child(book.display_title.clone()),
+                )
+                .accessibility_label(format!("打开《{}》", book.display_title))
+                .on_click(move |_, window, cx| {
+                    cx.stop_propagation();
+                    let _ = owner.update(cx, |app, cx| app.open_book(id, window, cx));
+                })
+                .into_any_element(),
+            _ => div()
+                .w_full()
+                .overflow_hidden()
+                .text_ellipsis()
+                .child(self.text(row_ix, col_ix))
+                .into_any_element(),
+        }
+    }
+
+    fn context_menu(
+        &mut self,
+        row_ix: usize,
+        menu: PopupMenu,
+        _: &mut Window,
+        _: &mut Context<TableState<Self>>,
+    ) -> PopupMenu {
+        let id = self.books[row_ix].id;
+        let rename_owner = self.owner.clone();
+        let delete_owner = self.owner.clone();
+        menu.item(
+            PopupMenuItem::new("重命名…")
+                .icon(IconName::FileText)
+                .on_click(move |_, window, cx| {
+                    let _ = rename_owner.update(cx, |app, cx| app.rename_dialog(id, window, cx));
+                }),
+        )
+        .separator()
+        .item(
+            PopupMenuItem::new("删除…")
+                .icon(IconName::Delete)
+                .on_click(move |_, window, cx| {
+                    let _ = delete_owner.update(cx, |app, cx| app.delete_dialog(id, window, cx));
+                }),
+        )
+    }
+}
 
 impl ReaderApp {
-    pub fn shelf(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    pub(crate) fn sync_shelf(&self, cx: &mut Context<Self>) {
+        self.shelf_table.update(cx, |table, cx| {
+            let selected = table
+                .selected_row()
+                .and_then(|ix| table.delegate().books.get(ix))
+                .map(|book| book.id);
+            table.delegate_mut().books.clone_from(&self.books);
+            table.clear_selection(cx);
+            table.set_right_clicked_row(None, cx);
+            if let Some(ix) =
+                selected.and_then(|id| self.books.iter().position(|book| book.id == id))
+            {
+                table.set_selected_row(ix, cx);
+            }
+            cx.notify();
+        });
+    }
+
+    fn selected_shelf_book(&self, cx: &App) -> Option<reader_core::BookId> {
+        let table = self.shelf_table.read(cx);
+        table
+            .selected_row()
+            .and_then(|ix| table.delegate().books.get(ix))
+            .map(|book| book.id)
+    }
+
+    pub fn shelf(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         if self.books.is_empty() {
             return div()
                 .size_full()
@@ -29,7 +258,38 @@ impl ReaderApp {
                 )
                 .into_any_element();
         }
-        let cards = self.settings.shelf == ShelfLayout::Cards;
+        if self.settings.shelf == ShelfLayout::List {
+            return div()
+                .image_cache(self.covers.clone())
+                .id("shelf")
+                .size_full()
+                .min_w_0()
+                .min_h_0()
+                .key_context("Shelf")
+                .on_action(cx.listener(|app, _: &OpenSelectedBook, window, cx| {
+                    if let Some(id) = app.selected_shelf_book(cx) {
+                        app.open_book(id, window, cx);
+                    }
+                }))
+                .on_action(cx.listener(|app, _: &RenameSelectedBook, window, cx| {
+                    if let Some(id) = app.selected_shelf_book(cx) {
+                        app.rename_dialog(id, window, cx);
+                    }
+                }))
+                .on_action(cx.listener(|app, _: &DeleteSelectedBook, window, cx| {
+                    if let Some(id) = app.selected_shelf_book(cx) {
+                        app.delete_dialog(id, window, cx);
+                    }
+                }))
+                .child(
+                    DataTable::new(&self.shelf_table)
+                        .accessibility_label("书架列表")
+                        .with_size(Size::Size(rems(4.5).to_pixels(window.rem_size())))
+                        .header_row_height(rems(2.5).to_pixels(window.rem_size()))
+                        .bordered(false),
+                )
+                .into_any_element();
+        }
         div()
             .image_cache(self.covers.clone())
             .id("shelf")
@@ -40,22 +300,12 @@ impl ReaderApp {
                 div()
                     .flex()
                     .gap_4()
-                    .when(cards, |view| view.flex_wrap())
-                    .when(!cards, |view| view.flex_col())
-                    .children(
-                        self.books
-                            .iter()
-                            .map(|book| self.book_card(book, cards, cx)),
-                    ),
+                    .flex_wrap()
+                    .children(self.books.iter().map(|book| self.book_card(book, cx))),
             )
             .into_any_element()
     }
-    fn book_card(
-        &self,
-        book: &Book,
-        cards: bool,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement + use<> {
+    fn book_card(&self, book: &Book, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let id = book.id;
         let cover = book
             .cover
@@ -97,8 +347,8 @@ impl ReaderApp {
             .border_1()
             .border_color(cx.theme().border)
             .rounded(cx.theme().radius)
-            .when(cards, |view| view.flex_col().w_56())
-            .when(!cards, |view| view.items_center().w_full())
+            .flex_col()
+            .w_56()
             .child(crate::controls::observed(
                 div()
                     .id(SharedString::from(format!("cover-{}", id.0)))
@@ -106,8 +356,8 @@ impl ReaderApp {
                     .overflow_hidden()
                     .flex_shrink_0()
                     .cursor_pointer()
-                    .when(cards, |view| view.h_56().w_full())
-                    .when(!cards, |view| view.h_16().w_12())
+                    .h_56()
+                    .w_full()
                     .on_click(
                         cx.listener(move |this, _, window, cx| this.open_book(id, window, cx)),
                     )
@@ -119,7 +369,6 @@ impl ReaderApp {
                     .flex_col()
                     .gap_1()
                     .min_w_0()
-                    .when(!cards, |view| view.flex_1())
                     .child(
                         Button::new(SharedString::from(format!("open-{}", id.0)))
                             .ghost()
