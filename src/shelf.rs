@@ -3,7 +3,7 @@ use gpui_kit::{
     component::{
         Size,
         button::{Button, ButtonVariants},
-        menu::{PopupMenu, PopupMenuItem},
+        menu::{DropdownMenu, PopupMenu, PopupMenuItem},
         table::{Column, DataTable, TableDelegate, TableState},
         *,
     },
@@ -191,25 +191,32 @@ impl TableDelegate for ShelfTable {
         _: &mut Window,
         _: &mut Context<TableState<Self>>,
     ) -> PopupMenu {
-        let id = self.books[row_ix].id;
-        let rename_owner = self.owner.clone();
-        let delete_owner = self.owner.clone();
-        menu.item(
-            PopupMenuItem::new("重命名…")
-                .icon(IconName::FileText)
-                .on_click(move |_, window, cx| {
-                    let _ = rename_owner.update(cx, |app, cx| app.rename_dialog(id, window, cx));
-                }),
-        )
-        .separator()
-        .item(
-            PopupMenuItem::new("删除…")
-                .icon(IconName::Delete)
-                .on_click(move |_, window, cx| {
-                    let _ = delete_owner.update(cx, |app, cx| app.delete_dialog(id, window, cx));
-                }),
-        )
+        book_actions(menu, self.books[row_ix].id, &self.owner)
     }
+}
+
+fn book_actions(
+    menu: PopupMenu,
+    id: reader_core::BookId,
+    owner: &WeakEntity<ReaderApp>,
+) -> PopupMenu {
+    let rename_owner = owner.clone();
+    let delete_owner = owner.clone();
+    menu.item(
+        PopupMenuItem::new("重命名…")
+            .icon(IconName::FileText)
+            .on_click(move |_, window, cx| {
+                let _ = rename_owner.update(cx, |app, cx| app.rename_dialog(id, window, cx));
+            }),
+    )
+    .separator()
+    .item(
+        PopupMenuItem::new("删除…")
+            .icon(IconName::Delete)
+            .on_click(move |_, window, cx| {
+                let _ = delete_owner.update(cx, |app, cx| app.delete_dialog(id, window, cx));
+            }),
+    )
 }
 
 impl ReaderApp {
@@ -290,20 +297,35 @@ impl ReaderApp {
                 )
                 .into_any_element();
         }
-        div()
-            .image_cache(self.covers.clone())
-            .id("shelf")
-            .size_full()
-            .overflow_y_scroll()
-            .p_4()
-            .child(
-                div()
-                    .flex()
-                    .gap_4()
-                    .flex_wrap()
-                    .children(self.books.iter().map(|book| self.book_card(book, cx))),
-            )
-            .into_any_element()
+        let books = self
+            .books
+            .iter()
+            .map(|book| self.book_card(book, cx).into_any_element())
+            .collect::<Vec<_>>();
+        let covers = self.covers.clone();
+        container_query(move |size, window, _| {
+            let gap = rems(1.).to_pixels(window.rem_size());
+            let min_width = rems(12.).to_pixels(window.rem_size());
+            let max_width = rems(20.).to_pixels(window.rem_size());
+            let width = (size.width - gap * 2.).max(Pixels::ZERO);
+            let columns = ((width + gap) / (min_width + gap)).floor().max(1.) as u16;
+            div()
+                .image_cache(covers)
+                .id("shelf")
+                .size_full()
+                .overflow_y_scroll()
+                .p_4()
+                .child(
+                    div()
+                        .w_full()
+                        .gap_4()
+                        .grid()
+                        .grid_cols(columns)
+                        .max_w(max_width * columns as f32 + gap * (columns - 1) as f32)
+                        .children(books),
+                )
+        })
+        .into_any_element()
     }
     fn book_card(&self, book: &Book, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let id = book.id;
@@ -342,13 +364,14 @@ impl ReaderApp {
         div()
             .id(SharedString::from(format!("book-{}", id.0)))
             .flex()
+            .min_w_0()
+            .w_full()
             .gap_3()
             .p_3()
             .border_1()
             .border_color(cx.theme().border)
             .rounded(cx.theme().radius)
             .flex_col()
-            .w_56()
             .child(crate::controls::observed(
                 div()
                     .id(SharedString::from(format!("cover-{}", id.0)))
@@ -372,7 +395,10 @@ impl ReaderApp {
                     .child(
                         Button::new(SharedString::from(format!("open-{}", id.0)))
                             .ghost()
+                            .min_w_0()
+                            .w_full()
                             .label(book.display_title.clone())
+                            .tooltip(book.display_title.clone())
                             .accessibility_label(format!("打开《{}》", book.display_title))
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.open_book(id, window, cx)
@@ -381,6 +407,7 @@ impl ReaderApp {
                     .child(
                         div()
                             .text_sm()
+                            .truncate()
                             .text_color(cx.theme().muted_foreground)
                             .child(metadata),
                     )
@@ -392,29 +419,17 @@ impl ReaderApp {
                     ),
             )
             .child(
-                div()
-                    .flex()
-                    .gap_1()
-                    .child(
-                        icon(
-                            SharedString::from(format!("rename-{}", id.0)),
-                            IconName::FileText,
-                            format!("重命名《{}》…", book.display_title),
-                        )
-                        .on_click(cx.listener(
-                            move |this, _, window, cx| this.rename_dialog(id, window, cx),
-                        )),
+                div().flex().justify_end().mt_auto().child(
+                    icon(
+                        SharedString::from(format!("book-menu-{}", id.0)),
+                        IconName::Ellipsis,
+                        format!("《{}》的更多操作", book.display_title),
                     )
-                    .child(
-                        icon(
-                            SharedString::from(format!("delete-{}", id.0)),
-                            IconName::Delete,
-                            format!("删除《{}》…", book.display_title),
-                        )
-                        .on_click(cx.listener(
-                            move |this, _, window, cx| this.delete_dialog(id, window, cx),
-                        )),
-                    ),
+                    .dropdown_menu_with_anchor(Anchor::TopRight, {
+                        let owner = cx.entity().downgrade();
+                        move |menu, _, _| book_actions(menu, id, &owner)
+                    }),
+                ),
             )
     }
 }
