@@ -74,6 +74,7 @@ impl ReaderApp {
                                         {
                                             *old = book;
                                         }
+                                        this.sync_shelf(cx);
                                     }
                                     Err(e) => this.status = format!("重命名失败：{e}"),
                                 }
@@ -120,7 +121,10 @@ impl ReaderApp {
                             let result = job.await;
                             let _ = this.update(cx, |this, cx| {
                                 match result {
-                                    Ok(books) => this.books = books,
+                                    Ok(books) => {
+                                        this.books = books;
+                                        this.sync_shelf(cx);
+                                    }
                                     Err(e) => this.status = format!("删除失败：{e}"),
                                 }
                                 cx.notify();

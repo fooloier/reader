@@ -124,6 +124,20 @@ impl Harness {
             std::thread::yield_now();
         }
     }
+    fn wait_window(&mut self, predicate: impl Fn(&Window) -> bool) {
+        let until = Instant::now() + Duration::from_secs(15);
+        loop {
+            let mut ready = false;
+            self.frame(|window, _| ready = predicate(window));
+            if ready {
+                break;
+            }
+            assert!(Instant::now() < until, "窗口状态超时");
+            self.cx
+                .background_executor
+                .advance_clock(Duration::from_millis(16));
+        }
+    }
     fn import(&mut self, filename: &str) -> BookId {
         self.click("import-files");
         assert!(self.cx.did_prompt_for_paths());
@@ -253,28 +267,27 @@ fn production_shelf_cards_reflow_with_consistent_columns() {
                 .all(|pair| pair[0].left() == pair[1].left() && pair[0].bottom() < pair[1].top())
         );
     });
-    h.frame(|window, _| {
-        assert!(
-            window
-                .find(gpui_kit::SharedString::from(format!("rename-{}", ids[0].0)))
-                .visible()
-        );
-        assert!(
-            window
-                .find(gpui_kit::SharedString::from(format!("delete-{}", ids[0].0)))
-                .visible()
+    h.frame(|window, cx| {
+        window.right_click(
+            gpui_kit::SharedString::from(format!("book-{}", ids[0].0)),
+            cx,
         );
     });
+    h.frame(|window, _| {
+        assert!(window.find_by_label("重命名…").visible());
+        assert!(window.find_by_label("删除…").visible());
+    });
+    h.press("escape");
     h.click("shelf-layout");
     h.click(&format!("book-menu-{}", ids[0].0));
     h.frame(|window, _| {
-        assert!(window.find_by_label("重命名").visible());
-        assert!(window.find_by_label("删除").visible());
+        assert!(window.find_by_label("重命名…").visible());
+        assert!(window.find_by_label("删除…").visible());
     });
     h.press("escape");
     h.frame(|window, _| {
-        assert!(window.try_find_by_label("重命名").is_none());
-        assert!(window.try_find_by_label("删除").is_none());
+        assert!(window.try_find_by_label("重命名…").is_none());
+        assert!(window.try_find_by_label("删除…").is_none());
     });
     assert!(h.cx.read(|cx| h.app.read(cx).workspace.tabs.is_empty()));
     h.click(&format!("open-{}", ids[0].0));
@@ -323,6 +336,171 @@ fn production_shelf_tabs_theme_and_sheets() {
     h.click(&format!("close-{}", id.0));
     assert!(h.cx.read(|cx| h.app.read(cx).workspace.tabs.is_empty()));
     h.frame(|window, _| assert!(window.find_by_label("书架").visible()));
+}
+
+#[test]
+fn production_shelf_table_resize_and_row_commands() {
+    let mut h = Harness::new("shelf-table");
+    let id = h.import("sample.epub");
+    h.click("shelf-layout");
+    let row = gpui_kit::SharedString::from(format!("book-{}", id.0));
+    let mut widths = Vec::new();
+    h.frame(|window, cx| {
+        let headers = window.find_all_by_role(gpui_kit::Role::ColumnHeader);
+        assert_eq!(headers.len(), 4);
+        assert_eq!(
+            headers
+                .iter()
+                .map(|header| header.label().unwrap())
+                .collect::<Vec<_>>(),
+            ["封面", "书名", "作者", "出版年月"]
+        );
+        let cells = window
+            .within(row.clone())
+            .find_all_by_role(gpui_kit::Role::Cell);
+        assert_eq!(cells.len(), 4);
+        assert_eq!(cells[1].label(), Some("测试书籍"));
+        assert_eq!(cells[2].label(), Some("测试作者"));
+        assert_eq!(cells[3].label(), Some("2021"));
+        assert!(
+            window
+                .try_find(gpui_kit::SharedString::from(format!("rename-{}", id.0)))
+                .is_none()
+        );
+        assert!(
+            window
+                .try_find(gpui_kit::SharedString::from(format!("delete-{}", id.0)))
+                .is_none()
+        );
+        for col_ix in 0usize..4 {
+            let before = window.find(("col-header", col_ix)).bounds();
+            let start = point(before.right() - px(1.), before.center().y);
+            window.drag(start, start + point(px(36.), px(0.)), cx);
+            let after = window.find(("col-header", col_ix)).bounds();
+            assert!(
+                after.size.width > before.size.width + px(20.),
+                "第 {col_ix} 列应可拖宽"
+            );
+            widths.push(after.size.width);
+        }
+        let cells = window
+            .within(row.clone())
+            .find_all_by_role(gpui_kit::Role::Cell);
+        for (col_ix, cell) in cells.iter().enumerate() {
+            let header = window.find(("col-header", col_ix)).bounds();
+            assert_eq!(cell.bounds().left(), header.left());
+            assert_eq!(cell.bounds().size.width, header.size.width);
+        }
+    });
+    h.click("shelf-layout");
+    h.frame(|window, _| {
+        assert!(
+            window
+                .find(gpui_kit::SharedString::from(format!("book-menu-{}", id.0)))
+                .visible()
+        );
+        let cover = window
+            .find(gpui_kit::SharedString::from(format!("cover-{}", id.0)))
+            .bounds();
+        let title = window
+            .find(gpui_kit::SharedString::from(format!("open-{}", id.0)))
+            .bounds();
+        assert!(cover.bottom() <= title.top());
+    });
+    h.click("shelf-layout");
+    h.import("sample.pdf");
+    h.wait(|app, _| !app.busy && app.books.len() == 2);
+    let other = h.cx.read(|cx| {
+        h.app
+            .read(cx)
+            .books
+            .iter()
+            .find(|book| book.id != id)
+            .unwrap()
+            .id
+    });
+    h.frame(|window, cx| {
+        for (col_ix, width) in widths.iter().enumerate() {
+            assert_eq!(
+                window.find(("col-header", col_ix)).bounds().size.width,
+                *width
+            );
+        }
+        let cells = window
+            .within(gpui_kit::SharedString::from(format!("book-{}", other.0)))
+            .find_all_by_role(gpui_kit::Role::Cell);
+        assert_eq!(cells[3].label(), Some("未知"));
+        window.right_click(row.clone(), cx);
+    });
+    h.frame(|window, _| {
+        assert!(window.find_by_label("重命名…").visible());
+        assert!(window.find_by_label("删除…").visible());
+    });
+    h.click_label("重命名…");
+    h.click("rename-title");
+    h.frame(|window, cx| {
+        window.press("secondary-a", cx);
+        window.input("表格中的新书名", cx);
+        window.click("ok", cx);
+    });
+    h.wait(|app, _| {
+        app.books
+            .iter()
+            .any(|book| book.id == id && book.display_title == "表格中的新书名")
+    });
+    h.frame(|window, _| {
+        assert_eq!(
+            window
+                .find(gpui_kit::SharedString::from(format!("open-{}", id.0)))
+                .label(),
+            Some("打开《表格中的新书名》")
+        );
+        for (col_ix, width) in widths.iter().enumerate() {
+            assert_eq!(
+                window.find(("col-header", col_ix)).bounds().size.width,
+                *width
+            );
+        }
+    });
+    h.click(&format!("cover-{}", id.0));
+    h.wait(|app, cx| matches!(&app.sessions[&id].read(cx).state, ReaderState::Epub(_)));
+    h.click(&format!("close-{}", id.0));
+    h.frame(|window, cx| window.right_click(row.clone(), cx));
+    h.click_label("删除…");
+    h.click("cancel");
+    assert_eq!(h.cx.read(|cx| h.app.read(cx).books.len()), 2);
+    h.frame(|window, cx| window.right_click(row.clone(), cx));
+    h.click_label("删除…");
+    h.click("ok");
+    h.wait(|app, _| app.books.len() == 1);
+    assert_eq!(h.cx.read(|cx| h.app.read(cx).books[0].id), other);
+    h.frame(|window, _| {
+        assert!(window.try_find(row).is_none());
+        for (col_ix, width) in widths.iter().enumerate() {
+            assert_eq!(
+                window.find(("col-header", col_ix)).bounds().size.width,
+                *width
+            );
+        }
+    });
+    h.frame(|window, cx| {
+        let cells = window
+            .within(gpui_kit::SharedString::from(format!("book-{}", other.0)))
+            .find_all_by_role(gpui_kit::Role::Cell);
+        let target = cells[2].bounds().center();
+        use gpui_kit::test::TestEventExt;
+        window.pointer_down(target, gpui_kit::MouseButton::Left, cx);
+        window.pointer_up(target, gpui_kit::MouseButton::Left, cx);
+    });
+    h.press("f2");
+    h.frame(|window, _| assert!(window.find("rename-title").visible()));
+    h.press("escape");
+    h.wait_window(|window| window.find("table").focused() == Some(true));
+    h.press("delete");
+    h.frame(|window, _| assert_eq!(window.find("ok").label(), Some("删除")));
+    h.click("cancel");
+    h.press("enter");
+    h.wait(|app, cx| matches!(&app.sessions[&other].read(cx).state, ReaderState::Pdf(_)));
 }
 
 #[test]
@@ -489,7 +667,7 @@ fn production_rename_delete_and_keyboard_tabs() {
     assert_eq!(h.cx.read(|cx| h.app.read(cx).workspace.tabs.len()), 1);
     h.click_label("书架");
     h.click(&format!("book-menu-{}", id.0));
-    h.click_label("重命名");
+    h.click_label("重命名…");
     h.click("rename-title");
     h.frame(|window, cx| {
         window.press("secondary-a", cx);
@@ -527,11 +705,11 @@ fn production_rename_delete_and_keyboard_tabs() {
     h.frame(|window, cx| window.press("secondary-w", cx));
     assert!(h.cx.read(|cx| h.app.read(cx).workspace.tabs.is_empty()));
     h.click(&format!("book-menu-{}", id.0));
-    h.click_label("删除");
+    h.click_label("删除…");
     h.click("cancel");
     assert_eq!(h.cx.read(|cx| h.app.read(cx).books.len()), 1);
     h.click(&format!("book-menu-{}", id.0));
-    h.click_label("删除");
+    h.click_label("删除…");
     h.click("ok");
     h.wait(|app, _| app.books.is_empty());
     assert!(
@@ -837,7 +1015,7 @@ fn production_folder_import_failure_feedback_and_delete_open_book() {
     h.wait(|app, cx| matches!(&app.sessions[&id].read(cx).state, ReaderState::Epub(_)));
     h.click_label("书架");
     h.click(&format!("book-menu-{}", id.0));
-    h.click_label("删除");
+    h.click_label("删除…");
     h.click("ok");
     h.wait(|app, _| app.books.is_empty());
     h.cx.read(|cx| {
@@ -874,7 +1052,7 @@ fn production_failed_rename_keeps_latest_position_and_original() {
     std::fs::create_dir(&collision).unwrap();
     h.click_label("书架");
     h.click(&format!("book-menu-{}", id.0));
-    h.click_label("重命名");
+    h.click_label("重命名…");
     h.click("rename-title");
     h.frame(|window, cx| {
         window.press("secondary-a", cx);

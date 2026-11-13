@@ -27,4 +27,4 @@ class ProductionUITests(unittest.TestCase):
             ARTIFACTS.mkdir(parents=True, exist_ok=True)
             (ARTIFACTS / "ui.log").write_text(result.stdout + result.stderr)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            self.assertEqual(rust_test_count(result.stdout), 16)
+            self.assertEqual(rust_test_count(result.stdout), 17)

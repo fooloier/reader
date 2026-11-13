@@ -3,17 +3,19 @@ use crate::reading::ReaderState;
 use crate::{
     controls::icon,
     reading::{CoverImages, ReadingSession},
+    shelf::ShelfTable,
 };
 use anyhow::Result;
 use gpui_kit::{
     component::{
         tab::{Tab, TabBar},
+        table::TableState,
         *,
     },
     prelude::*,
     *,
 };
-use reader_core::{Appearance, Book, BookId, Settings, Workspace};
+use reader_core::{Appearance, Book, BookId, Settings, ShelfLayout, Workspace};
 use reader_runtime::{AppPaths, Library, service::Service};
 use std::{collections::HashMap, path::PathBuf};
 
@@ -32,6 +34,7 @@ actions!(
 
 pub fn init(cx: &mut App) {
     gpui_kit::init(cx);
+    crate::shelf::init(cx);
     let keys = if cfg!(target_os = "macos") {
         ["cmd-o", "cmd-shift-o", "cmd-,", "cmd-w", "cmd-q"]
     } else {
@@ -89,6 +92,7 @@ pub struct ReaderApp {
     pub service: Service,
     focus: FocusHandle,
     _focus_lost: Subscription,
+    pub(crate) shelf_table: Entity<TableState<ShelfTable>>,
     pub(crate) covers: Entity<CoverImages>,
     pub(crate) settings_focus: FocusHandle,
     pub(crate) toc_focus: FocusHandle,
@@ -139,9 +143,16 @@ impl ReaderApp {
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
         let focus_lost = cx.on_focus_lost(window, |this, window, cx| {
-            let target = window
-                .focus_lost_restore_target(cx)
-                .unwrap_or_else(|| this.focus.clone());
+            let target = window.focus_lost_restore_target(cx).unwrap_or_else(|| {
+                if this.workspace.active.is_none()
+                    && this.settings.shelf == ShelfLayout::List
+                    && !this.books.is_empty()
+                {
+                    this.shelf_table.focus_handle(cx)
+                } else {
+                    this.focus.clone()
+                }
+            });
             window.focus(&target, cx);
         });
         Theme::change(
@@ -152,7 +163,19 @@ impl ReaderApp {
             Some(window),
             cx,
         );
+        let owner = cx.weak_entity();
+        let shelf_table = cx.new(|cx| {
+            TableState::new(
+                ShelfTable::new(boot.books.clone(), owner, boot.paths.cache.clone(), window),
+                window,
+                cx,
+            )
+            .col_movable(false)
+            .col_selectable(false)
+            .sortable(false)
+        });
         let mut this = Self {
+            shelf_table,
             books: boot.books,
             settings: boot.settings,
             workspace: boot.workspace,
@@ -376,6 +399,7 @@ impl ReaderApp {
                 match result {
                     Ok((results, books)) => {
                         this.books = books;
+                        this.sync_shelf(cx);
                         let imported = results.iter().filter(|r| r.status == "imported").count();
                         let duplicates = results.iter().filter(|r| r.status == "duplicate").count();
                         let skipped = results.iter().filter(|r| r.status == "skipped").count();
@@ -403,7 +427,7 @@ impl ReaderApp {
     }
 }
 impl Render for ReaderApp {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.shutdown != Shutdown::Running {
             return div()
                 .size_full()
@@ -446,7 +470,7 @@ impl Render for ReaderApp {
             if let Some(session) = self.workspace.active.and_then(|id| self.sessions.get(&id)) {
                 session.clone().into_any_element()
             } else {
-                self.shelf(cx).into_any_element()
+                self.shelf(window, cx).into_any_element()
             };
         div()
             .size_full()
