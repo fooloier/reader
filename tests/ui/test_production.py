@@ -11,6 +11,10 @@ class ProductionUITests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="reader-ui-") as directory:
             root = pathlib.Path(directory)
             epub(root / "sample.epub")
+            shelf = root / "responsive-shelf"
+            shelf.mkdir()
+            for i in range(7):
+                epub(shelf / f"book-{i}.epub", title=f"{i} 很长的中文书名与连续英文标题 " + "LongTitle" * 20)
             pdf(root / "sample.pdf")
             realistic_epub(root / "realistic.epub")
             bookmarked_epub(root / "bookmarks.epub")
@@ -23,4 +27,4 @@ class ProductionUITests(unittest.TestCase):
             ARTIFACTS.mkdir(parents=True, exist_ok=True)
             (ARTIFACTS / "ui.log").write_text(result.stdout + result.stderr)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            self.assertEqual(rust_test_count(result.stdout), 15)
+            self.assertEqual(rust_test_count(result.stdout), 16)

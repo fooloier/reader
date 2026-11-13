@@ -30,25 +30,38 @@ impl ReaderApp {
                 .into_any_element();
         }
         let cards = self.settings.shelf == ShelfLayout::Cards;
-        div()
-            .image_cache(self.covers.clone())
-            .id("shelf")
-            .size_full()
-            .overflow_y_scroll()
-            .p_4()
-            .child(
-                div()
-                    .flex()
-                    .gap_4()
-                    .when(cards, |view| view.flex_wrap())
-                    .when(!cards, |view| view.flex_col())
-                    .children(
-                        self.books
-                            .iter()
-                            .map(|book| self.book_card(book, cards, cx)),
-                    ),
-            )
-            .into_any_element()
+        let books = self
+            .books
+            .iter()
+            .map(|book| self.book_card(book, cards, cx).into_any_element())
+            .collect::<Vec<_>>();
+        let covers = self.covers.clone();
+        container_query(move |size, window, _| {
+            let gap = rems(1.).to_pixels(window.rem_size());
+            let min_width = rems(12.).to_pixels(window.rem_size());
+            let max_width = rems(20.).to_pixels(window.rem_size());
+            let width = (size.width - gap * 2.).max(Pixels::ZERO);
+            let columns = ((width + gap) / (min_width + gap)).floor().max(1.) as u16;
+            div()
+                .image_cache(covers)
+                .id("shelf")
+                .size_full()
+                .overflow_y_scroll()
+                .p_4()
+                .child(
+                    div()
+                        .w_full()
+                        .gap_4()
+                        .when(cards, |view| {
+                            view.grid()
+                                .grid_cols(columns)
+                                .max_w(max_width * columns as f32 + gap * (columns - 1) as f32)
+                        })
+                        .when(!cards, |view| view.flex().flex_col())
+                        .children(books),
+                )
+        })
+        .into_any_element()
     }
     fn book_card(
         &self,
@@ -92,13 +105,15 @@ impl ReaderApp {
         div()
             .id(SharedString::from(format!("book-{}", id.0)))
             .flex()
+            .min_w_0()
+            .w_full()
             .gap_3()
             .p_3()
             .border_1()
             .border_color(cx.theme().border)
             .rounded(cx.theme().radius)
-            .when(cards, |view| view.flex_col().w_56())
-            .when(!cards, |view| view.items_center().w_full())
+            .when(cards, |view| view.flex_col())
+            .when(!cards, |view| view.items_center())
             .child(crate::controls::observed(
                 div()
                     .id(SharedString::from(format!("cover-{}", id.0)))
@@ -123,7 +138,10 @@ impl ReaderApp {
                     .child(
                         Button::new(SharedString::from(format!("open-{}", id.0)))
                             .ghost()
+                            .min_w_0()
+                            .when(cards, |view| view.w_full())
                             .label(book.display_title.clone())
+                            .tooltip(book.display_title.clone())
                             .accessibility_label(format!("打开《{}》", book.display_title))
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.open_book(id, window, cx)
@@ -132,6 +150,7 @@ impl ReaderApp {
                     .child(
                         div()
                             .text_sm()
+                            .when(cards, |view| view.truncate())
                             .text_color(cx.theme().muted_foreground)
                             .child(metadata),
                     )

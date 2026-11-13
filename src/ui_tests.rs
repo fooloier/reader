@@ -138,6 +138,103 @@ impl Harness {
 }
 
 #[test]
+fn production_shelf_cards_reflow_with_consistent_columns() {
+    let mut h = Harness::new("responsive-shelf");
+    h.click("import-folder");
+    let root = PathBuf::from(std::env::var("READER_UI_ROOT").unwrap());
+    h.cx.simulate_path_prompt_response(|_| Some(vec![root.join("responsive-shelf")]));
+    h.wait(|app, _| !app.busy && app.books.len() == 7);
+    let ids = h.cx.read(|cx| {
+        h.app
+            .read(cx)
+            .books
+            .iter()
+            .map(|book| book.id)
+            .collect::<Vec<_>>()
+    });
+    for font_size in [16., 20.] {
+        h.cx.update(|cx| {
+            gpui_kit::component::Theme::update(cx, |theme| theme.font_size = px(font_size))
+        });
+        let mut previous_columns = 0;
+        for width in [
+            160., 320., 431., 432., 433., 539., 540., 541., 620., 900., 1100., 1500.,
+        ] {
+            h.cx.simulate_window_resize(h.window, size(px(width), px(3500.)));
+            h.frame(|window, _| {
+                let covers = ids
+                    .iter()
+                    .map(|id| {
+                        window
+                            .find(gpui_kit::SharedString::from(format!("cover-{}", id.0)))
+                            .bounds()
+                    })
+                    .collect::<Vec<_>>();
+                let columns = covers
+                    .iter()
+                    .take_while(|bounds| bounds.top() == covers[0].top())
+                    .count();
+                assert!(columns >= previous_columns);
+                previous_columns = columns;
+                let rem = window.rem_size();
+                let inset = rem * 1.75 + px(1.);
+                let card_width = covers[0].size.width + rem * 1.5 + px(2.);
+                assert!(card_width <= rem * 20. + px(1.));
+                assert!(card_width >= rem * 12. - px(1.) || columns == 1);
+                assert!((covers[0].left() - inset).abs() <= px(1.));
+                if columns > 1 {
+                    assert!(
+                        (covers[columns - 1].right() - (px(width) - inset)).abs() <= px(1.),
+                        "完整行应填满可用宽度，窗口宽度 {width}"
+                    );
+                }
+                for (ix, bounds) in covers.iter().enumerate() {
+                    assert!(
+                        (bounds.size.width - covers[0].size.width).abs() <= px(1.),
+                        "末行应保持相同列宽"
+                    );
+                    assert!((bounds.left() - covers[ix % columns].left()).abs() <= px(1.));
+                    assert!(bounds.right() <= px(width) - inset + px(1.));
+                    let title = window
+                        .find(gpui_kit::SharedString::from(format!("open-{}", ids[ix].0)))
+                        .bounds();
+                    assert!(
+                        title.left() >= bounds.left() && title.right() <= bounds.right() + px(1.),
+                        "长书名不应撑开卡片"
+                    );
+                    if ix % columns > 0 {
+                        assert!(
+                            (bounds.left() - covers[ix - 1].right() - (rem * 2.5 + px(2.))).abs()
+                                <= px(1.)
+                        );
+                    }
+                }
+            });
+        }
+        assert!(previous_columns >= 4);
+    }
+    h.click("shelf-layout");
+    h.frame(|window, _| {
+        let covers = ids
+            .iter()
+            .map(|id| {
+                window
+                    .find(gpui_kit::SharedString::from(format!("cover-{}", id.0)))
+                    .bounds()
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            covers
+                .windows(2)
+                .all(|pair| pair[0].left() == pair[1].left() && pair[0].bottom() < pair[1].top())
+        );
+    });
+    h.click("shelf-layout");
+    h.click(&format!("open-{}", ids[0].0));
+    h.wait(|app, cx| matches!(&app.sessions[&ids[0]].read(cx).state, ReaderState::Epub(_)));
+}
+
+#[test]
 fn production_shelf_tabs_theme_and_sheets() {
     let mut h = Harness::new("shelf");
     h.frame(|window, _| {
