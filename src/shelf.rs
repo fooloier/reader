@@ -2,6 +2,7 @@ use crate::{app::ReaderApp, controls::icon};
 use gpui_kit::{
     component::{
         button::{Button, ButtonVariants},
+        menu::{DropdownMenu, PopupMenuItem},
         *,
     },
     prelude::*,
@@ -161,30 +162,70 @@ impl ReaderApp {
                             .child(book.format.extension().to_uppercase()),
                     ),
             )
-            .child(
-                div()
-                    .flex()
-                    .gap_1()
-                    .child(
+            .when(cards, |view| {
+                let app = cx.entity().downgrade();
+                view.child(
+                    div().flex().justify_end().mt_auto().child(
                         icon(
-                            SharedString::from(format!("rename-{}", id.0)),
-                            IconName::FileText,
-                            format!("重命名《{}》…", book.display_title),
+                            SharedString::from(format!("book-menu-{}", id.0)),
+                            IconName::Ellipsis,
+                            format!("《{}》的更多操作", book.display_title),
                         )
-                        .on_click(cx.listener(
-                            move |this, _, window, cx| this.rename_dialog(id, window, cx),
-                        )),
-                    )
-                    .child(
-                        icon(
-                            SharedString::from(format!("delete-{}", id.0)),
-                            IconName::Delete,
-                            format!("删除《{}》…", book.display_title),
-                        )
-                        .on_click(cx.listener(
-                            move |this, _, window, cx| this.delete_dialog(id, window, cx),
-                        )),
+                        .dropdown_menu_with_anchor(
+                            Anchor::TopRight,
+                            move |menu, _, _| {
+                                let rename_app = app.clone();
+                                let delete_app = app.clone();
+                                menu.item(
+                                    PopupMenuItem::new("重命名")
+                                        .icon(IconName::FileText)
+                                        .on_click(move |_, window, cx| {
+                                            let _ = rename_app.update(cx, |app, cx| {
+                                                app.rename_dialog(id, window, cx);
+                                            });
+                                        }),
+                                )
+                                .separator()
+                                .item(
+                                    PopupMenuItem::new("删除").icon(IconName::Delete).on_click(
+                                        move |_, window, cx| {
+                                            let _ = delete_app.update(cx, |app, cx| {
+                                                app.delete_dialog(id, window, cx);
+                                            });
+                                        },
+                                    ),
+                                )
+                            },
+                        ),
                     ),
-            )
+                )
+            })
+            .when(!cards, |view| {
+                view.child(
+                    div()
+                        .flex()
+                        .gap_1()
+                        .child(
+                            icon(
+                                SharedString::from(format!("rename-{}", id.0)),
+                                IconName::FileText,
+                                format!("重命名《{}》…", book.display_title),
+                            )
+                            .on_click(cx.listener(
+                                move |this, _, window, cx| this.rename_dialog(id, window, cx),
+                            )),
+                        )
+                        .child(
+                            icon(
+                                SharedString::from(format!("delete-{}", id.0)),
+                                IconName::Delete,
+                                format!("删除《{}》…", book.display_title),
+                            )
+                            .on_click(cx.listener(
+                                move |this, _, window, cx| this.delete_dialog(id, window, cx),
+                            )),
+                        ),
+                )
+            })
     }
 }
