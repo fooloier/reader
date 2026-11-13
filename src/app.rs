@@ -91,6 +91,8 @@ pub struct ReaderApp {
     pub paths: AppPaths,
     pub service: Service,
     focus: FocusHandle,
+    books_requested: u64,
+    books_applied: u64,
     _focus_lost: Subscription,
     pub(crate) shelf_table: Entity<TableState<ShelfTable>>,
     pub(crate) covers: Entity<CoverImages>,
@@ -184,6 +186,8 @@ impl ReaderApp {
             busy: false,
             paths: boot.paths,
             service: boot.service,
+            books_requested: 0,
+            books_applied: 0,
             focus,
             _focus_lost: focus_lost,
             covers: CoverImages::new(cx),
@@ -221,11 +225,56 @@ impl ReaderApp {
         }
     }
     pub fn open_book(&mut self, id: BookId, window: &mut Window, cx: &mut Context<Self>) {
+        if self.shutdown != Shutdown::Running || !self.books.iter().any(|book| book.id == id) {
+            return;
+        }
         window.focus(&self.focus, cx);
         self.create_session(id, cx);
         self.workspace.open(id);
         self.persist_workspace(cx);
+        let revision = self.request_books();
+        let job = self.service.submit(move |library| {
+            library.record_open(id)?;
+            library.books()
+        });
+        cx.spawn(async move |this, cx| {
+            let result = job.await;
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(books) => this.apply_books(revision, books, cx),
+                    Err(error) => this.status = format!("更新书架失败：{error}"),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
         cx.notify();
+    }
+    pub(crate) fn request_books(&mut self) -> u64 {
+        self.books_requested += 1;
+        self.books_requested
+    }
+    pub(crate) fn apply_books(
+        &mut self,
+        revision: u64,
+        mut books: Vec<Book>,
+        cx: &mut Context<Self>,
+    ) {
+        if revision > self.books_applied {
+            let locations = self
+                .books
+                .iter()
+                .map(|book| (book.id, &book.location))
+                .collect::<HashMap<_, _>>();
+            for book in &mut books {
+                if let Some(location) = locations.get(&book.id) {
+                    book.location.clone_from(location);
+                }
+            }
+            self.books_applied = revision;
+            self.books = books;
+            self.sync_shelf(cx);
+        }
     }
     pub fn close_book(&mut self, id: BookId, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus, cx);
@@ -388,6 +437,7 @@ impl ReaderApp {
         self.busy = true;
         self.status = "正在导入书籍…".into();
         cx.notify();
+        let revision = self.request_books();
         let job = self.service.submit(move |library| {
             let results = library.import(&paths);
             Ok((results, library.books()?))
@@ -398,8 +448,7 @@ impl ReaderApp {
                 this.busy = false;
                 match result {
                     Ok((results, books)) => {
-                        this.books = books;
-                        this.sync_shelf(cx);
+                        this.apply_books(revision, books, cx);
                         let imported = results.iter().filter(|r| r.status == "imported").count();
                         let duplicates = results.iter().filter(|r| r.status == "duplicate").count();
                         let skipped = results.iter().filter(|r| r.status == "skipped").count();

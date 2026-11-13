@@ -15,7 +15,7 @@ python3 .agents/skills/verify-reader/scripts/verify.py doctor
 python3 .agents/skills/verify-reader/scripts/verify.py ui
 ```
 
-需要 Rust、系统图形开发库、平台文本系统和中文字体。UI 编排在临时目录生成 PDF、EPUB、目录和长标题夹具，逐项创建空隔离书库及生产 ReaderApp。Harness 渲染首帧后才操作，异步导入等通过最长 15 秒状态等待确认可用。无需账号、端口或手工迁移。命令成功应包含 17 项 Rust 测试通过。
+需要 Rust、系统图形开发库、平台文本系统和中文字体。UI 编排在临时目录生成 PDF、EPUB、目录和长标题夹具，逐项创建空隔离书库及生产 ReaderApp。Harness 渲染首帧后才操作，异步导入等通过最长 15 秒状态等待确认可用。无需账号、端口或手工迁移。命令成功应包含全部 Rust 用例通过。
 
 需要真实窗口像素或启动恢复证明时，再运行：
 

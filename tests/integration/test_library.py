@@ -1,4 +1,5 @@
 import shutil
+import sqlite3
 from support import ROOT, RuntimeCase, epub, pdf, realistic_epub
 import json
 import subprocess
@@ -6,6 +7,60 @@ import time
 
 
 class LibraryTests(RuntimeCase):
+    def test_addition_and_explicit_open_recency_survives_restart(self):
+        ids = []
+        sources = []
+        for title in ("第一本", "第二本"):
+            source = self.sources / f"{title}.epub"
+            epub(source, title=title)
+            sources.append(source)
+            ids.append(self.command(op="import", paths=[str(source)])[0]["id"])
+        first, second = ids
+
+        def order():
+            return [book["id"] for book in self.command(op="books")]
+
+        self.assertEqual(order(), [second, first])
+        self.command(op="open", id=first)
+        self.assertEqual(order(), [first, second])
+        responses = self.commands(*({"op": "open", "id": book_id} for book_id in [first, second, first, second]))
+        self.assertTrue(all(response["ok"] for response in responses), responses)
+        self.assertEqual(order(), [second, first])
+        self.command(op="open", id=first)
+        third_source = self.sources / "第三本.epub"
+        epub(third_source, title="第三本")
+        third = self.command(op="import", paths=[str(third_source)])[0]["id"]
+        self.assertEqual(order(), [third, first, second])
+        self.command(op="position", id=second, location={"format": "epub", "href": "/OPS/two.xhtml", "anchor": "end"})
+        self.command(op="rename", id=second, title="新书名")
+        self.command(op="import", paths=[str(sources[1])])
+        self.command(op="workspace", value={"tabs": [first, second], "active": second})
+        self.command(op="workspace")
+        self.assertEqual(order(), [third, first, second])
+        self.assertFalse(self.commands({"op": "open", "id": 999})[0]["ok"])
+        self.assertEqual(order(), [third, first, second])
+        self.command(op="delete", id=third)
+        self.assertEqual(order(), [first, second])
+
+    def test_legacy_library_migration_preserves_newest_first_and_book_data(self):
+        first_source = self.sources / "first.epub"
+        second_source = self.sources / "second.epub"
+        epub(first_source, title="第一本")
+        epub(second_source, title="第二本")
+        first = self.command(op="import", paths=[str(first_source)])[0]["id"]
+        second = self.command(op="import", paths=[str(second_source)])[0]["id"]
+        location = {"format": "epub", "href": "/OPS/one.xhtml", "anchor": "p30"}
+        self.command(op="position", id=first, location=location)
+        self.command(op="rename", id=first, title="保留书名")
+        expected = self.command(op="books")
+        with sqlite3.connect(self.library / "data/library.sqlite3") as db:
+            db.executescript("DROP INDEX books_recency; ALTER TABLE books DROP COLUMN recency; PRAGMA user_version=0;")
+        self.assertEqual(self.command(op="books"), expected)
+        self.assertEqual(self.command(op="books"), expected)
+        self.command(op="open", id=first)
+        self.assertEqual([book["id"] for book in self.command(op="books")], [first, second])
+        self.assertTrue(all((self.library / "data/books" / book["filename"]).is_file() for book in expected))
+
     def test_recursive_import_metadata_dedup_and_failures(self):
         folder = self.sources / "nested"
         folder.mkdir()

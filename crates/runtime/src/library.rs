@@ -37,9 +37,19 @@ impl Library {
             .open(paths.data.join("library.lock"))?;
         lock.try_lock_exclusive()
             .context("书库正在被另一个 Reader 进程使用")?;
-        let db = Connection::open(paths.data.join("library.sqlite3"))?;
+        let mut db = Connection::open(paths.data.join("library.sqlite3"))?;
         db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA synchronous=FULL;
             CREATE TABLE IF NOT EXISTS books(id INTEGER PRIMARY KEY AUTOINCREMENT, digest TEXT UNIQUE NOT NULL, format TEXT NOT NULL, metadata TEXT NOT NULL, title TEXT NOT NULL, filename TEXT NOT NULL UNIQUE, cover TEXT, location TEXT);")?;
+        if db.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))? == 0 {
+            let migration = db.transaction()?;
+            migration.execute_batch(
+                "ALTER TABLE books ADD COLUMN recency INTEGER NOT NULL DEFAULT 0;
+                UPDATE books SET recency=id;
+                CREATE INDEX books_recency ON books(recency DESC, id DESC);
+                PRAGMA user_version=1;",
+            )?;
+            migration.commit()?;
+        }
         let mut library = Self {
             paths,
             db,
@@ -55,7 +65,7 @@ impl Library {
         self.diagnostics.borrow().clone()
     }
     pub fn books(&self) -> Result<Vec<Book>> {
-        let mut query = self.db.prepare("SELECT id,digest,format,metadata,title,filename,cover,location FROM books ORDER BY id DESC")?;
+        let mut query = self.db.prepare("SELECT id,digest,format,metadata,title,filename,cover,location FROM books ORDER BY recency DESC, id DESC")?;
         let rows = query.query_map([], |r| {
             Ok((
                 r.get::<_, i64>(0)?,
@@ -171,12 +181,20 @@ impl Library {
                 Ok(name)
             })
             .transpose()?;
-        let inserted = self.db.execute("INSERT INTO books(digest,format,metadata,title,filename,cover) VALUES(?1,?2,?3,?4,?5,?6)", params![digest, format.extension(), serde_json::to_string(&metadata)?, metadata.title, filename, cover_name]);
+        let inserted = self.db.execute("INSERT INTO books(digest,format,metadata,title,filename,cover,recency) SELECT ?1,?2,?3,?4,?5,?6,COALESCE(MAX(recency),0)+1 FROM books", params![digest, format.extension(), serde_json::to_string(&metadata)?, metadata.title, filename, cover_name]);
         if let Err(e) = inserted {
             let _ = fs::remove_file(target);
             return Err(e.into());
         }
         Ok((BookId(self.db.last_insert_rowid()), false))
+    }
+    pub fn record_open(&mut self, id: BookId) -> Result<()> {
+        let updated = self.db.execute(
+            "UPDATE books SET recency=(SELECT COALESCE(MAX(recency),0)+1 FROM books) WHERE id=?1",
+            [id.0],
+        )?;
+        ensure!(updated == 1, "书籍已被删除");
+        Ok(())
     }
     pub fn rename(&mut self, id: BookId, title: &str) -> Result<Book> {
         let title = title.trim();

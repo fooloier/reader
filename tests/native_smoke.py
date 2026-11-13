@@ -29,6 +29,12 @@ def main():
         requests = [{"op": "import", "paths": [str(root / "sample.epub"), str(root / "sample.pdf"), str(root / "realistic.epub")]}, {"op": "books"}]
         result = run(str(ROOT / "target/debug/reader-driver"), "--native", env=env, input="".join(json.dumps(r) + "\n" for r in requests))
         books = json.loads(result.stdout.splitlines()[-1])["value"]
+        oldest = books[-1]["id"]
+        result = run(str(ROOT / "target/debug/reader-driver"), "--native", env=env, input=json.dumps({"op": "open", "id": oldest}) + "\n" + json.dumps({"op": "books"}) + "\n")
+        books = json.loads(result.stdout.splitlines()[-1])["value"]
+        if books[0]["id"] != oldest:
+            raise AssertionError("最近打开的书籍未排在最前")
+        expected_order = [book["id"] for book in books]
         evidence = []
         initial = run(str(ROOT / "target/debug/reader-driver"), "--native", env=env, input=json.dumps({"op": "settings"}) + "\n")
         base_settings = json.loads(initial.stdout)["value"]
@@ -94,9 +100,12 @@ def main():
                     process.wait(timeout=10)
                     if process.returncode:
                         raise RuntimeError(f"原生进程退出码 {process.returncode}")
+                    saved = run(str(ROOT / "target/debug/reader-driver"), "--native", env=env, input=json.dumps({"op": "books"}) + "\n")
+                    saved_books = json.loads(saved.stdout)["value"]
+                    actual_order = [book["id"] for book in saved_books]
+                    if actual_order != expected_order:
+                        raise AssertionError(f"自动恢复或退出保存改变了书架顺序 {actual_order}")
                     if position:
-                        saved = run(str(ROOT / "target/debug/reader-driver"), "--native", env=env, input=json.dumps({"op": "books"}) + "\n")
-                        saved_books = json.loads(saved.stdout)["value"]
                         actual = next(b["location"] for b in saved_books if b["id"] == selected)
                         if mode == "epub":
                             inactive = next(b["location"] for b in saved_books if b["id"] == background_pdf)
@@ -106,7 +115,7 @@ def main():
                             raise AssertionError(f"EPUB 恢复位置不符 {actual}")
                         if mode == "pdf" and (actual["page"] != 1 or actual["fraction"] > 0.01):
                             raise AssertionError(f"PDF 恢复位置不符 {actual}")
-                    evidence.append({"view": mode, "size": [width, height], "screenshot": str(screenshot), "exit_code": process.returncode})
+                    evidence.append({"view": mode, "size": [width, height], "screenshot": str(screenshot), "exit_code": process.returncode, "book_order": actual_order})
                 finally:
                     if process.poll() is None:
                         process.terminate()

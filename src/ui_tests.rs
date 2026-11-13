@@ -149,6 +149,140 @@ impl Harness {
         self.wait(|app, _| !app.busy && !app.books.is_empty());
         self.cx.read(|cx| self.app.read(cx).books[0].id)
     }
+    fn shelf_order(&mut self, ids: &[BookId]) {
+        self.wait(|app, _| app.books.iter().map(|book| book.id).eq(ids.iter().copied()));
+        self.frame(|window, _| {
+            let bounds = ids
+                .iter()
+                .map(|id| {
+                    window
+                        .find(gpui_kit::SharedString::from(format!("cover-{}", id.0)))
+                        .bounds()
+                })
+                .collect::<Vec<_>>();
+            assert!(bounds.windows(2).all(|pair| {
+                pair[0].top() < pair[1].top()
+                    || (pair[0].top() == pair[1].top() && pair[0].left() < pair[1].left())
+            }));
+        });
+    }
+}
+
+#[test]
+fn production_shelf_recency_is_shared_and_persists_without_restore_promotion() {
+    for layout in [ShelfLayout::Cards, ShelfLayout::List] {
+        let name = if layout == ShelfLayout::Cards {
+            "recency-cards"
+        } else {
+            "recency-list"
+        };
+        let mut h = Harness::new(name);
+        if layout == ShelfLayout::List {
+            h.click("shelf-layout");
+        }
+        let first = h.import("sample.epub");
+        let second = h.import("realistic.epub");
+        h.shelf_order(&[second, first]);
+        h.click(&format!("cover-{}", first.0));
+        h.wait(|app, cx| matches!(&app.sessions[&first].read(cx).state, ReaderState::Epub(_)));
+        h.click_label("书架");
+        h.shelf_order(&[first, second]);
+        h.click(&format!("open-{}", second.0));
+        h.wait(|app, cx| matches!(&app.sessions[&second].read(cx).state, ReaderState::Epub(_)));
+        h.click_label("书架");
+        h.shelf_order(&[second, first]);
+        let session = h.cx.read(|cx| h.app.read(cx).sessions[&first].clone());
+        if layout == ShelfLayout::List {
+            h.frame(|window, cx| {
+                window.click_at(
+                    gpui_kit::SharedString::from(format!("book-{}", first.0)),
+                    point(px(5.), px(5.)),
+                    cx,
+                );
+            });
+            h.press("enter");
+        } else {
+            h.click(&format!("open-{}", first.0));
+        }
+        h.wait(|app, _| app.workspace.active == Some(first));
+        assert!(h.cx.read(|cx| h.app.read(cx).sessions[&first] == session));
+        drop(session);
+        assert_eq!(h.cx.read(|cx| h.app.read(cx).workspace.tabs.len()), 2);
+        h.click_label("书架");
+        h.shelf_order(&[first, second]);
+        let service = h.cx.read(|cx| h.app.read(cx).service.clone());
+        let (release, blocked) = std::sync::mpsc::channel();
+        let pending = service.submit(move |_| {
+            blocked.recv_timeout(Duration::from_secs(15))?;
+            Ok(())
+        });
+        for id in [second, first, second] {
+            h.click(&format!("open-{}", id.0));
+            h.click_label("书架");
+        }
+        release.send(()).unwrap();
+        futures::executor::block_on(pending).unwrap();
+        futures::executor::block_on(service.submit(|_| Ok(()))).unwrap();
+        h.frame(|_, _| {});
+        h.shelf_order(&[second, first]);
+        let (release, blocked) = std::sync::mpsc::channel();
+        let pending = service.submit(move |_| {
+            blocked.recv_timeout(Duration::from_secs(15))?;
+            Ok(())
+        });
+        h.click(&format!("open-{}", first.0));
+        h.click("next");
+        assert_eq!(h.reading_index(first), 1);
+        h.click(&format!("close-{}", first.0));
+        h.click_label("书架");
+        release.send(()).unwrap();
+        futures::executor::block_on(pending).unwrap();
+        futures::executor::block_on(service.submit(|_| Ok(()))).unwrap();
+        h.frame(|_, _| {});
+        h.shelf_order(&[first, second]);
+        h.click(&format!("open-{}", first.0));
+        h.wait(|app, cx| matches!(&app.sessions[&first].read(cx).state, ReaderState::Epub(_)));
+        assert_eq!(h.reading_index(first), 1);
+        h.click_label("书架");
+        h.click("shelf-layout");
+        h.shelf_order(&[first, second]);
+        h.click(&format!("open-{}", first.0));
+        let third = h.import("bookmarks.epub");
+        h.click_label("书架");
+        h.shelf_order(&[third, first, second]);
+        h.click("shelf-layout");
+        h.shelf_order(&[third, first, second]);
+        h.import("realistic.epub");
+        h.shelf_order(&[third, first, second]);
+        h.press("secondary-q");
+        h.wait(|app, _| app.shutdown == crate::app::Shutdown::Saved);
+        let saved = futures::executor::block_on(service.submit(|library| library.books())).unwrap();
+        assert_eq!(
+            saved.iter().map(|book| book.id).collect::<Vec<_>>(),
+            [third, first, second]
+        );
+        drop(service);
+        drop(h);
+        let mut restarted = Harness::new(name);
+        restarted.wait(|app, cx| {
+            app.workspace.tabs == [second, first]
+                && app
+                    .sessions
+                    .values()
+                    .all(|session| matches!(&session.read(cx).state, ReaderState::Epub(_)))
+        });
+        restarted.shelf_order(&[third, first, second]);
+        restarted.click("shelf-layout");
+        restarted.shelf_order(&[third, first, second]);
+        let service = restarted
+            .cx
+            .read(|cx| restarted.app.read(cx).service.clone());
+        let saved = futures::executor::block_on(service.submit(|library| library.books())).unwrap();
+        assert_eq!(
+            saved.iter().map(|book| book.id).collect::<Vec<_>>(),
+            [third, first, second]
+        );
+    }
 }
 
 #[test]

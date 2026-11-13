@@ -61,21 +61,16 @@ impl ReaderApp {
                     let _ = owner.update(cx, |this, cx| {
                         let was_open = this.sessions.contains_key(&id);
                         this.retire_session(id, window, cx);
-                        let job = this
-                            .service
-                            .submit(move |library| library.rename(id, &title));
+                        let revision = this.request_books();
+                        let job = this.service.submit(move |library| {
+                            library.rename(id, &title)?;
+                            library.books()
+                        });
                         cx.spawn(async move |this, cx| {
                             let result = job.await;
                             let _ = this.update(cx, |this, cx| {
                                 match result {
-                                    Ok(book) => {
-                                        if let Some(old) =
-                                            this.books.iter_mut().find(|b| b.id == id)
-                                        {
-                                            *old = book;
-                                        }
-                                        this.sync_shelf(cx);
-                                    }
+                                    Ok(books) => this.apply_books(revision, books, cx),
                                     Err(e) => this.status = format!("重命名失败：{e}"),
                                 }
                                 if was_open
@@ -113,6 +108,7 @@ impl ReaderApp {
                 .on_ok(move |_, window, cx| {
                     let _ = owner.update(cx, |this, cx| {
                         this.close_book(id, window, cx);
+                        let revision = this.request_books();
                         let job = this.service.submit(move |library| {
                             library.delete(id)?;
                             library.books()
@@ -121,10 +117,7 @@ impl ReaderApp {
                             let result = job.await;
                             let _ = this.update(cx, |this, cx| {
                                 match result {
-                                    Ok(books) => {
-                                        this.books = books;
-                                        this.sync_shelf(cx);
-                                    }
+                                    Ok(books) => this.apply_books(revision, books, cx),
                                     Err(e) => this.status = format!("删除失败：{e}"),
                                 }
                                 cx.notify();

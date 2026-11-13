@@ -41,6 +41,10 @@ fn execute(library: &mut Library, c: Value) -> Result<Value> {
             library.import(&serde_json::from_value::<Vec<PathBuf>>(c["paths"].clone())?),
         )?,
         "books" => serde_json::to_value(library.books()?)?,
+        "open" => {
+            library.record_open(id()?)?;
+            Value::Null
+        }
         "rename" => {
             serde_json::to_value(library.rename(id()?, c["title"].as_str().context("缺少书名")?)?)?
         }
