@@ -1,4 +1,8 @@
-use crate::{app::ReaderApp, reading::ReaderState, settings::SettingsPane};
+use crate::{
+    app::ReaderApp,
+    reading::{BookmarkDestination, ReaderState},
+    settings::SettingsPane,
+};
 use gpui_kit::{
     component::{
         button::{Button, ButtonVariants},
@@ -10,6 +14,7 @@ use gpui_kit::{
     *,
 };
 use reader_core::BookId;
+use std::cell::Cell;
 
 impl ReaderApp {
     pub fn rename_dialog(&mut self, id: BookId, window: &mut Window, cx: &mut Context<Self>) {
@@ -167,74 +172,97 @@ impl ReaderApp {
             .active
             .and_then(|id| self.sessions.get(&id))
             .cloned();
+        let scroll = ScrollHandle::new();
+        let reveal = Cell::new(true);
         let owner = cx.weak_entity();
-        window.open_sheet_at(Placement::Left, cx, move |sheet, _, cx| {
-            let mut content = div().flex().flex_col().gap_2();
-            let mut count = 0;
-            if let Some(session) = &session {
-                match &session.read(cx).state {
-                    ReaderState::Pdf(pdf) => {
-                        for (i, item) in pdf.read(cx).outline().iter().enumerate() {
-                            count += 1;
-                            let pdf = pdf.clone();
-                            let page = item.page;
-                            let owner = owner.clone();
-                            content = content.child(
-                                Button::new(("toc-pdf", i))
-                                    .ghost()
-                                    .label(item.title.clone())
-                                    .ml(rems(item.level.min(16) as f32))
-                                    .disabled(page.is_none())
-                                    .on_click(move |_, window, cx| {
-                                        if let Some(page) = page {
-                                            pdf.update(cx, |v, cx| v.go_to_page(page, cx));
+        window.open_sheet_at(Placement::Left, cx, move |sheet, window, cx| {
+            let (entries, active) = session
+                .as_ref()
+                .map(|s| s.read(cx).bookmarks(cx))
+                .unwrap_or_default();
+            if let Some(active) = active
+                && reveal.replace(false)
+            {
+                let scroll = scroll.clone();
+                window.on_next_frame(move |window, _| {
+                    scroll.scroll_to_item(active);
+                    window.refresh();
+                });
+            }
+            let empty = entries.is_empty();
+            let mut content = div()
+                .id("bookmarks-scroll")
+                .role(Role::List)
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .min_h_0()
+                .px_4()
+                .overflow_y_scroll()
+                .track_scroll(&scroll)
+                .flex()
+                .flex_col()
+                .gap_2();
+            for (row, item) in entries.into_iter().enumerate() {
+                let session = session.clone();
+                let owner = owner.clone();
+                let (kind, row_kind) = match &item.destination {
+                    BookmarkDestination::Pdf(_) => ("toc-pdf", "bookmark-toc-pdf"),
+                    BookmarkDestination::Epub { .. } => ("toc-epub", "bookmark-toc-epub"),
+                };
+                let selected = active == Some(row);
+                let row = div()
+                    .id((row_kind, item.index))
+                    .role(Role::ListItem)
+                    .aria_selected(selected)
+                    .flex_shrink_0()
+                    .ml(rems(item.depth.min(16) as f32))
+                    .child(
+                        Button::new((kind, item.index))
+                            .ghost()
+                            .label(item.title)
+                            .selected(selected)
+                            .w_full()
+                            .on_click(move |_, window, cx| {
+                                if let Some(session) = &session {
+                                    match (&session.read(cx).state, &item.destination) {
+                                        (ReaderState::Pdf(pdf), BookmarkDestination::Pdf(page)) => {
+                                            pdf.clone().update(cx, |v, cx| v.go_to_page(*page, cx));
                                         }
-                                        window.close_sheet(cx);
-                                        let _ = owner.update(cx, |this, cx| {
-                                            this.overlay = None;
-                                            cx.notify();
-                                        });
-                                    }),
-                            );
-                        }
-                    }
-                    ReaderState::Epub(pane) => {
-                        for (i, item) in pane.read(cx).document.toc.iter().enumerate() {
-                            count += 1;
-                            let pane = pane.clone();
-                            let resolved = pane.read(cx).document.destination(&item.href).is_some();
-                            let depth = item.depth;
-                            let href = item.href.clone();
-                            let owner = owner.clone();
-                            content = content.child(
-                                Button::new(("toc-epub", i))
-                                    .ghost()
-                                    .label(item.title.clone())
-                                    .ml(rems(depth.min(16) as f32))
-                                    .disabled(!resolved)
-                                    .on_click(move |_, window, cx| {
-                                        pane.update(cx, |v, cx| v.navigate(&href, cx));
-                                        window.close_sheet(cx);
-                                        let _ = owner.update(cx, |this, cx| {
-                                            this.overlay = None;
-                                            cx.notify();
-                                        });
-                                    }),
-                            );
-                        }
-                    }
-                    _ => {}
-                }
+                                        (
+                                            ReaderState::Epub(pane),
+                                            BookmarkDestination::Epub { href, .. },
+                                        ) => {
+                                            pane.clone().update(cx, |v, cx| v.navigate(href, cx));
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                                window.close_sheet(cx);
+                                let _ = owner.update(cx, |this, cx| {
+                                    this.overlay = None;
+                                    cx.notify();
+                                });
+                            }),
+                    );
+                content = content.child(crate::controls::observed(row));
             }
             let owner = owner.clone();
             sheet
-                .title("目录与书签")
+                .title("书签")
                 .size(rems(22.))
-                .child(content)
-                .when(count == 0, |sheet| sheet.child("这本书没有可显示的目录"))
-                .child(
+                .child(crate::controls::observed(content.when(empty, |view| {
+                    view.child(crate::controls::observed(
+                        div()
+                            .id("bookmarks-empty")
+                            .role(Role::Status)
+                            .aria_label("这本书没有可跳转的书签")
+                            .child("这本书没有可跳转的书签"),
+                    ))
+                })))
+                .footer(
                     div()
-                        .mt_4()
                         .text_sm()
                         .child("书签来自书内目录；本版本不创建个人书签。"),
                 )

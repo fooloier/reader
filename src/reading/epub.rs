@@ -90,7 +90,7 @@ impl EpubPane {
         self.scroll = ScrollHandle::new();
         cx.notify();
     }
-    pub fn location(&self) -> Location {
+    pub(crate) fn reading_position(&self) -> (usize, usize) {
         let chapter = &self.document.chapters[self.chapter];
         let index = self
             .restore_target
@@ -98,6 +98,11 @@ impl EpubPane {
             .or(self.pending)
             .unwrap_or_else(|| self.scroll.top_item())
             .min(chapter.blocks.len().saturating_sub(1));
+        (self.chapter, index)
+    }
+    pub fn location(&self) -> Location {
+        let (chapter, index) = self.reading_position();
+        let chapter = &self.document.chapters[chapter];
         Location::Epub {
             href: chapter.href.clone(),
             anchor: chapter

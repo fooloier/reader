@@ -85,6 +85,17 @@ impl Harness {
             window.pointer_up(target, gpui_kit::MouseButton::Left, cx);
         });
     }
+    fn press(&mut self, key: &str) {
+        self.frame(|window, cx| window.press(key, cx));
+    }
+    fn reading_index(&self, id: BookId) -> usize {
+        self.cx
+            .read(|cx| match &self.app.read(cx).sessions[&id].read(cx).state {
+                ReaderState::Pdf(pdf) => pdf.read(cx).viewport().0,
+                ReaderState::Epub(pane) => pane.read(cx).chapter,
+                _ => panic!("阅读会话未就绪"),
+            })
+    }
     #[track_caller]
     fn wait(&mut self, predicate: impl Fn(&ReaderApp, &App) -> bool) {
         let until = Instant::now() + Duration::from_secs(15);
@@ -409,14 +420,21 @@ fn production_real_xhtml_toc_empty_chapter_and_endpoint() {
     h.frame(|_, _| {});
     h.frame(|window, cx| window.click_at("epub-block-2", point(px(38.), px(12.)), cx));
     h.wait(|app,cx| match &app.sessions[&id].read(cx).state { ReaderState::Epub(pane) => matches!(pane.read(cx).location(), reader_core::Location::Epub { anchor, .. } if anchor == "节 %20#"), _ => false });
+    h.press("left");
+    assert_eq!(h.reading_index(id), 2);
+    h.frame(|window, cx| window.click_at("epub-block-2", point(px(38.), px(12.)), cx));
+    h.wait(|app,cx| match &app.sessions[&id].read(cx).state { ReaderState::Epub(pane) => matches!(pane.read(cx).location(), reader_core::Location::Epub { anchor, .. } if anchor == "节 %20#"), _ => false });
     h.click("toc");
-    h.frame(|window, cx| {
+    h.frame(|window, _| {
         assert!(
             window.find(("toc-epub", 1usize)).bounds().left()
                 > window.find(("toc-epub", 0usize)).bounds().left()
         );
-        assert_eq!(window.find(("toc-epub", 2usize)).disabled(), Some(true));
-        window.click(("toc-epub", 2usize), cx);
+        assert!(window.try_find(("toc-epub", 2usize)).is_none());
+        assert_eq!(
+            window.find(("bookmark-toc-epub", 1usize)).selected(),
+            Some(true)
+        );
     });
     assert!(h.cx.read(|cx| h.app.read(cx).overlay.is_some()));
     h.frame(|window, cx| window.click(("toc-epub", 1usize), cx));
@@ -447,6 +465,200 @@ fn production_real_xhtml_toc_empty_chapter_and_endpoint() {
     drop(h);
     let mut restarted = Harness::new("real-xhtml");
     restarted.wait(|app,cx| app.workspace.active == Some(id) && match &app.sessions[&id].read(cx).state { ReaderState::Epub(pane) => matches!(pane.read(cx).location(), reader_core::Location::Epub { anchor, .. } if anchor == "节 %20#"), _ => false });
+}
+
+#[test]
+fn production_epub_bookmarks_follow_reading_and_keyboard_navigation() {
+    let mut h = Harness::new("epub-bookmarks");
+    let id = h.import("bookmarks.epub");
+    h.click(&format!("open-{}", id.0));
+    h.wait(|app, cx| matches!(&app.sessions[&id].read(cx).state, ReaderState::Epub(_)));
+    h.frame(|window, cx| window.click_at("epub-block-0", point(px(40.), px(10.)), cx));
+    for (key, chapter) in [
+        ("right", 1),
+        ("left", 0),
+        ("pagedown", 1),
+        ("pagedown", 1),
+        ("pageup", 0),
+        ("pageup", 0),
+    ] {
+        h.press(key);
+        assert_eq!(h.reading_index(id), chapter, "{key}");
+    }
+    h.press("shift-right");
+    assert_eq!(h.reading_index(id), 0);
+    h.frame(|window, cx| {
+        window.scroll(
+            "epub-scroll",
+            gpui_kit::ScrollDelta::Pixels(point(px(0.), px(-3000.))),
+            cx,
+        )
+    });
+    h.frame(|_, _| {});
+    let paragraph =
+        h.cx.read(|cx| match &h.app.read(cx).sessions[&id].read(cx).state {
+            ReaderState::Epub(pane) => match pane.read(cx).location() {
+                reader_core::Location::Epub { anchor, .. } => {
+                    anchor.strip_prefix('p').unwrap().parse::<usize>().unwrap()
+                }
+                _ => unreachable!(),
+            },
+            _ => unreachable!(),
+        });
+    assert!(paragraph > 20);
+    for _ in 0..2 {
+        h.click("toc");
+        h.frame(|window, cx| {
+            assert_eq!(window.find("toc").label(), Some("书签…"));
+            assert!(window.try_find(("toc-epub", 0usize)).is_none());
+            let current = window.find(("bookmark-toc-epub", paragraph + 1));
+            assert_eq!(current.selected(), Some(true));
+            let viewport = window.find("bookmarks-scroll").bounds();
+            assert!(
+                current.visible(),
+                "current={:?} viewport={viewport:?}",
+                current.bounds()
+            );
+            assert!(current.bounds().top() >= viewport.top());
+            assert!(current.bounds().bottom() <= viewport.bottom());
+            window.scroll(
+                "bookmarks-scroll",
+                gpui_kit::ScrollDelta::Pixels(point(px(0.), px(5000.))),
+                cx,
+            );
+        });
+        h.press("pagedown");
+        assert_eq!(h.reading_index(id), 0);
+        h.press("escape");
+        h.wait(|app, _| app.overlay.is_none());
+    }
+    h.click("next");
+    assert_eq!(h.reading_index(id), 1);
+    h.click("toc");
+    h.frame(|window, _| {
+        let current = window.find(("bookmark-toc-epub", 61usize));
+        assert_eq!(current.selected(), Some(true));
+        assert!(current.visible());
+    });
+    h.press("left");
+    assert_eq!(h.reading_index(id), 1);
+    h.press("escape");
+    h.click("settings");
+    for key in ["left", "right", "pageup", "pagedown"] {
+        h.press(key);
+        assert_eq!(h.reading_index(id), 1);
+    }
+    h.press("escape");
+    let app = h.app.clone();
+    h.frame(|window, cx| app.update(cx, |app, cx| app.rename_dialog(id, window, cx)));
+    h.click("rename-title");
+    h.frame(|window, cx| {
+        window.press("secondary-a", cx);
+        window.input("abc", cx);
+        window.press("left", cx);
+        window.press("backspace", cx);
+        assert_eq!(window.find("rename-title").value(), Some("ac"));
+    });
+    for key in ["left", "right", "pageup", "pagedown"] {
+        h.press(key);
+        assert_eq!(h.reading_index(id), 1);
+    }
+    h.click("cancel");
+    h.press("left");
+    assert_eq!(h.reading_index(id), 0);
+}
+
+#[test]
+fn production_bookmarks_hide_unresolved_entries_and_show_empty_state() {
+    for (name, filename) in [
+        ("empty-epub-bookmarks", "empty-bookmarks.epub"),
+        ("empty-pdf-bookmarks", "empty-bookmarks.pdf"),
+    ] {
+        let mut h = Harness::new(name);
+        let id = h.import(filename);
+        h.click(&format!("open-{}", id.0));
+        h.wait(|app, cx| match &app.sessions[&id].read(cx).state {
+            ReaderState::Epub(_) => true,
+            ReaderState::Pdf(pdf) => pdf.read(cx).page_count() == 3,
+            _ => false,
+        });
+        h.click("toc");
+        h.frame(|window, _| {
+            assert!(window.try_find(("toc-epub", 0usize)).is_none());
+            assert!(window.try_find(("toc-pdf", 0usize)).is_none());
+            assert!(window.find("bookmarks-empty").visible());
+            assert_eq!(
+                window.find("bookmarks-empty").label(),
+                Some("这本书没有可跳转的书签")
+            );
+        });
+        h.press("escape");
+        h.wait(|app, _| app.overlay.is_none());
+        h.frame(|window, _| assert_eq!(window.find("toc").focused(), Some(true)));
+    }
+}
+
+#[test]
+fn production_pdf_bookmarks_and_focused_viewer_share_navigation() {
+    let mut h = Harness::new("pdf-bookmarks");
+    let id = h.import("bookmarks.pdf");
+    h.click(&format!("open-{}", id.0));
+    h.wait(|app, cx| match &app.sessions[&id].read(cx).state {
+        ReaderState::Pdf(pdf) => pdf.read(cx).page_count() == 3 && pdf.read(cx).is_viewport_ready(),
+        _ => false,
+    });
+    h.frame(|window, cx| {
+        use gpui_kit::test::TestEventExt;
+        let center = point(px(700.), px(400.));
+        window.pointer_down(center, gpui_kit::MouseButton::Left, cx);
+        window.pointer_up(center, gpui_kit::MouseButton::Left, cx);
+    });
+    for (key, page) in [
+        ("pagedown", 1),
+        ("left", 0),
+        ("right", 1),
+        ("pagedown", 2),
+        ("right", 2),
+        ("pageup", 1),
+    ] {
+        h.press(key);
+        assert_eq!(h.reading_index(id), page, "{key}");
+    }
+    h.press("secondary-left");
+    assert_eq!(h.reading_index(id), 1);
+    for _ in 0..2 {
+        h.click("toc");
+        h.frame(|window, _| {
+            assert!(window.try_find(("toc-pdf", 0usize)).is_none());
+            let current = window.find(("bookmark-toc-pdf", 41usize));
+            assert_eq!(current.selected(), Some(true));
+            let viewport = window.find("bookmarks-scroll").bounds();
+            assert!(
+                current.visible(),
+                "current={:?} viewport={viewport:?}",
+                current.bounds()
+            );
+            assert!(current.bounds().top() >= viewport.top());
+            assert!(current.bounds().bottom() <= viewport.bottom());
+        });
+        h.press("pageup");
+        assert_eq!(h.reading_index(id), 1);
+        h.press("escape");
+        h.wait(|app, _| app.overlay.is_none());
+    }
+    h.click("next");
+    assert_eq!(h.reading_index(id), 2);
+    h.click("toc");
+    h.frame(|window, cx| {
+        assert_eq!(
+            window.find(("bookmark-toc-pdf", 42usize)).selected(),
+            Some(true)
+        );
+        window.click(("toc-pdf", 41usize), cx);
+    });
+    assert_eq!(h.reading_index(id), 1);
+    h.press("right");
+    assert_eq!(h.reading_index(id), 2);
 }
 
 #[test]

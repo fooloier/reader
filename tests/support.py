@@ -20,7 +20,7 @@ def rust_test_count(output):
     return sum(map(int, results))
 
 
-def pdf(path, title="Fixture PDF", pages=3):
+def pdf(path, title="Fixture PDF", pages=3, bookmarks=None):
     objects = [b"<< /Type /Catalog /Pages 2 0 R /Outlines 5 0 R >>", b"", b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>", f"<< /Title ({title}) /Author (Test Author) /CreationDate (D:20200101000000) >>".encode(), b"<< /Type /Outlines /First 6 0 R /Last 6 0 R /Count 1 >>", b"<< /Title (Chapter one) /Parent 5 0 R /Dest [7 0 R /Fit] >>"]
     page_ids = []
     for i in range(pages):
@@ -29,6 +29,13 @@ def pdf(path, title="Fixture PDF", pages=3):
         content = f"BT /F1 24 Tf 40 730 Td (Reader page {i + 1} selectable text) Tj ET".encode()
         objects.extend([f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 600 800] /Resources << /Font << /F1 3 0 R >> >> /Contents {page_id + 1} 0 R >>".encode(), b"<< /Length " + str(len(content)).encode() + b" >>\nstream\n" + content + b"\nendstream"])
     objects[1] = f"<< /Type /Pages /Kids [{' '.join(f'{i} 0 R' for i in page_ids)}] /Count {pages} >>".encode()
+    if bookmarks is not None:
+        first = len(objects) + 1
+        objects[4] = f"<< /Type /Outlines /First {first} 0 R /Last {first + len(bookmarks) - 1} 0 R /Count {len(bookmarks)} >>".encode()
+        for i, (label, page) in enumerate(bookmarks):
+            destination = f"/Dest [{page_ids[page]} 0 R /Fit]" if page is not None else ""
+            sibling = f"/Next {first + i + 1} 0 R" if i + 1 < len(bookmarks) else ""
+            objects.append(f"<< /Title ({label}) /Parent 5 0 R {destination} {sibling} >>".encode())
     data = bytearray(b"%PDF-1.4\n")
     offsets = [0]
     for i, obj in enumerate(objects, 1):
@@ -90,6 +97,19 @@ def realistic_epub(path, version=3):
     if version == 2:
         entries["OPS/book.opf"] = entries["OPS/book.opf"].decode().replace('version="3.0"', 'version="2.0"').replace(' properties="nav"', '').replace(' properties="cover-image"', '').replace('</metadata>', '<meta name="cover" content="cover"/></metadata>').replace('</manifest>', '<item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/></manifest>').replace('<spine>', '<spine toc="ncx">').encode()
         entries["OPS/toc.ncx"] = f'<?xml version="1.0"?><!DOCTYPE ncx PUBLIC "-//NISO//DTD ncx 2005-1//EN" "http://www.daisy.org/z3986/2005/ncx-2005-1.dtd"><ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1"><head><meta name="dtb:uid" content="fixture"/></head><docTitle><text>真实 XHTML</text></docTitle><navMap><navPoint id="parent" playOrder="1"><navLabel><text>章节中间</text></navLabel><content src="one.xhtml#p30"/><navPoint id="target" playOrder="2"><navLabel><text>特殊文件名</text></navLabel><content src="{chapter_url}#{anchor}"/></navPoint></navPoint></navMap></ncx>'.encode()
+    with zipfile.ZipFile(path, "w") as archive:
+        for name, data in entries.items():
+            archive.writestr(name, data)
+
+
+def bookmarked_epub(path, invalid_only=False):
+    epub(path)
+    with zipfile.ZipFile(path) as archive:
+        entries = {name: archive.read(name) for name in archive.namelist()}
+    links = ''.join(f'<li><a href="one.xhtml#p{i}">段落 {i}</a></li>' for i in range(60))
+    children = f'<ol>{links}</ol>' if not invalid_only else ''
+    second = '<li><a href="two.xhtml#second">第二章</a></li>' if not invalid_only else ''
+    entries["OPS/nav.xhtml"] = f'<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"><body><nav epub:type="toc"><ol><li><a href="one.xhtml#missing">无效书签</a>{children}</li>{second}</ol></nav></body></html>'.encode()
     with zipfile.ZipFile(path, "w") as archive:
         for name, data in entries.items():
             archive.writestr(name, data)

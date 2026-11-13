@@ -17,22 +17,9 @@ impl ReaderApp {
             .workspace
             .active
             .and_then(|id| self.sessions.get(&id))
-            .map(|session| match &session.read(cx).state {
-                ReaderState::Pdf(pdf) => {
-                    let pdf = pdf.read(cx);
-                    (
-                        pdf.viewport().0 > 0,
-                        pdf.viewport().0 + 1 < pdf.page_count(),
-                    )
-                }
-                ReaderState::Epub(pane) => {
-                    let pane = pane.read(cx);
-                    (
-                        pane.chapter > 0,
-                        pane.chapter + 1 < pane.document.chapters.len(),
-                    )
-                }
-                _ => (false, false),
+            .map(|session| {
+                let session = session.read(cx);
+                (session.can_step(false, cx), session.can_step(true, cx))
             })
             .unwrap_or((false, false));
         div()
@@ -81,7 +68,7 @@ impl ReaderApp {
             })
             .when(reading, |row| {
                 row.child(
-                    icon("toc", IconName::PanelLeft, "目录与书签…")
+                    icon("toc", IconName::PanelLeft, "书签…")
                         .track_focus(&self.toc_focus)
                         .toggled(self.overlay == Some("toc"))
                         .on_click(cx.listener(|this, _, window, cx| this.toc_sheet(window, cx))),
@@ -89,24 +76,16 @@ impl ReaderApp {
                 .child(
                     icon("previous", IconName::ChevronLeft, "上一页或上一章")
                         .disabled(!previous)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            if let Some(v) =
-                                this.workspace.active.and_then(|id| this.sessions.get(&id))
-                            {
-                                v.update(cx, |v, cx| v.step(false, cx));
-                            }
-                        })),
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.step_reading(false, window, cx)),
+                        ),
                 )
                 .child(
                     icon("next", IconName::ChevronRight, "下一页或下一章")
                         .disabled(!next)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            if let Some(v) =
-                                this.workspace.active.and_then(|id| this.sessions.get(&id))
-                            {
-                                v.update(cx, |v, cx| v.step(true, cx));
-                            }
-                        })),
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.step_reading(true, window, cx)),
+                        ),
                 )
             })
             .when_some(pdf, |row, pdf| {

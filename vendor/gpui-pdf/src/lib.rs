@@ -2475,8 +2475,8 @@ impl Render for PdfView {
                     return;
                 }
                 match key {
-                    "pagedown" => this.next_page(cx),
-                    "pageup" => this.prev_page(cx),
+                    "pagedown" if this.show_chrome => this.next_page(cx),
+                    "pageup" if this.show_chrome => this.prev_page(cx),
                     "home" => this.go_to_page(0, cx),
                     "end" => {
                         let last = this.dims.len().saturating_sub(1);

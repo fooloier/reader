@@ -19,7 +19,15 @@ use std::{collections::HashMap, path::PathBuf};
 
 actions!(
     reader,
-    [ImportFiles, ImportFolder, OpenSettings, CloseBook, Quit]
+    [
+        ImportFiles,
+        ImportFolder,
+        OpenSettings,
+        CloseBook,
+        Quit,
+        Previous,
+        Next
+    ]
 );
 
 pub fn init(cx: &mut App) {
@@ -35,6 +43,10 @@ pub fn init(cx: &mut App) {
         KeyBinding::new(keys[2], OpenSettings, Some("Reader")),
         KeyBinding::new(keys[3], CloseBook, Some("Reader")),
         KeyBinding::new(keys[4], Quit, Some("Reader")),
+        KeyBinding::new("left", Previous, Some("Reader && !Input")),
+        KeyBinding::new("right", Next, Some("Reader && !Input")),
+        KeyBinding::new("pageup", Previous, Some("Reader && !Input")),
+        KeyBinding::new("pagedown", Next, Some("Reader && !Input")),
     ]);
 }
 
@@ -76,6 +88,7 @@ pub struct ReaderApp {
     pub paths: AppPaths,
     pub service: Service,
     focus: FocusHandle,
+    _focus_lost: Subscription,
     pub(crate) covers: Entity<CoverImages>,
     pub(crate) settings_focus: FocusHandle,
     pub(crate) toc_focus: FocusHandle,
@@ -85,6 +98,23 @@ pub struct ReaderApp {
 }
 
 impl ReaderApp {
+    pub(crate) fn step_reading(
+        &mut self,
+        forward: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.shutdown != Shutdown::Running
+            || window.has_active_sheet(cx)
+            || window.has_active_dialog(cx)
+            || window.has_focused_input(cx)
+        {
+            return;
+        }
+        if let Some(session) = self.workspace.active.and_then(|id| self.sessions.get(&id)) {
+            session.update(cx, |v, cx| v.step(forward, cx));
+        }
+    }
     #[cfg(feature = "test-support")]
     pub fn is_ready(&self, cx: &App) -> bool {
         self.workspace
@@ -108,6 +138,12 @@ impl ReaderApp {
         }
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
+        let focus_lost = cx.on_focus_lost(window, |this, window, cx| {
+            let target = window
+                .focus_lost_restore_target(cx)
+                .unwrap_or_else(|| this.focus.clone());
+            window.focus(&target, cx);
+        });
         Theme::change(
             match boot.settings.appearance {
                 Appearance::Light => ThemeMode::Light,
@@ -126,6 +162,7 @@ impl ReaderApp {
             paths: boot.paths,
             service: boot.service,
             focus,
+            _focus_lost: focus_lost,
             covers: CoverImages::new(cx),
             settings_focus: cx.focus_handle().tab_stop(true),
             toc_focus: cx.focus_handle().tab_stop(true),
@@ -430,6 +467,12 @@ impl Render for ReaderApp {
                 }
             }))
             .on_action(cx.listener(|this, _: &Quit, window, cx| this.begin_shutdown(window, cx)))
+            .on_action(
+                cx.listener(|this, _: &Previous, window, cx| this.step_reading(false, window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &Next, window, cx| this.step_reading(true, window, cx)),
+            )
             .child(
                 TabBar::new("book-tabs")
                     .selected_index(selected)

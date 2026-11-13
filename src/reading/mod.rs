@@ -1,5 +1,7 @@
+mod bookmarks;
 mod epub;
 mod images;
+pub(crate) use bookmarks::BookmarkDestination;
 pub use epub::EpubPane;
 use gpui_kit::{component::ActiveTheme, prelude::*, *};
 use gpui_pdf::{PdfEvent, PdfStyle, PdfView};
@@ -167,6 +169,9 @@ impl ReadingSession {
         self.closed = true;
     }
     pub fn step(&mut self, forward: bool, cx: &mut Context<Self>) {
+        if !self.can_step(forward, cx) {
+            return;
+        }
         match &self.state {
             ReaderState::Pdf(pdf) => pdf.update(cx, |v, cx| {
                 if forward {
@@ -177,6 +182,27 @@ impl ReadingSession {
             }),
             ReaderState::Epub(pane) => pane.update(cx, |v, cx| v.step(forward, cx)),
             _ => {}
+        }
+    }
+    pub(crate) fn can_step(&self, forward: bool, cx: &App) -> bool {
+        match &self.state {
+            ReaderState::Pdf(pdf) => {
+                let pdf = pdf.read(cx);
+                if forward {
+                    pdf.viewport().0 + 1 < pdf.page_count()
+                } else {
+                    pdf.viewport().0 > 0
+                }
+            }
+            ReaderState::Epub(pane) => {
+                let pane = pane.read(cx);
+                if forward {
+                    pane.chapter + 1 < pane.document.chapters.len()
+                } else {
+                    pane.chapter > 0
+                }
+            }
+            _ => false,
         }
     }
 }
