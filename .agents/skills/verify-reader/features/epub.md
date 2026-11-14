@@ -20,6 +20,12 @@ Preconditions: 从 Launch 的空隔离目录和生成夹具开始。
 - 结果：复制文本正确；章节与书签同步；排版变化；重新打开恢复锚点；空章节正常显示。
 - 涉及磁盘结果时执行 `python3 .agents/skills/verify-reader/scripts/verify.py integration`；原生窗口证据使用 `native`。
 
+## 选中翻译
+
+同一 `ui` 命令运行生产事件测试。`production_epub_translation_glyph_preservation_keyboard_and_reflow` 与 `production_epub_translation_cross_block_stale_and_dismissal` 覆盖软换行、反向和跨块拖选、点击保留、复制、Tab/Enter、翻译 Action、旧请求结果、外部关闭、滚动和重排。
+
+测试用本地 Rust HTTP 服务注入生产 TranslationService，不发送公共网络请求。公共接口检查另运行 `cargo test --locked -p reader-runtime translation::tests::public_api_smoke -- --ignored --nocapture`，报告实际接口结果。原生像素仍单独使用 `native`，不能从事件断言推断像素通过。
+
 ## Gotchas
 
 夹具由 UI 编排生成；复杂出版物和全部字体未覆盖；native 的锚点由预置产生，只证明恢复。 缺失前提时记录失败，不缩减断言。上面列出的入口只有在对应用例实际操作后才能标记通过。

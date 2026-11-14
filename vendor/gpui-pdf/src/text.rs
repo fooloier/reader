@@ -261,25 +261,24 @@ impl PageText {
         let mut out = String::new();
         let mut prev: Option<&Run> = None;
         for run in runs {
-            if let Some(p) = prev
-                && run.text != " "
-                && p.text != " "
-            {
-                let line_h = run.rect.h.max(p.rect.h).max(0.001);
-                let new_line = (run.rect.center_y() - p.rect.center_y()).abs() > line_h * 0.6;
-                let gap = run.rect.x - p.rect.right() > line_h * 0.6;
-                if newlines {
-                    if new_line {
-                        out.push('\n');
-                    } else if gap && !out.ends_with(|c: char| c.is_whitespace()) {
+            if !run.text.trim().is_empty() {
+                if let Some(p) = prev {
+                    let line_h = run.rect.h.max(p.rect.h).max(0.001);
+                    let new_line = (run.rect.center_y() - p.rect.center_y()).abs() > line_h * 0.6;
+                    let gap = run.rect.x - p.rect.right() > line_h * 0.6;
+                    if newlines {
+                        if new_line {
+                            out.push('\n');
+                        } else if gap && !out.ends_with(|c: char| c.is_whitespace()) {
+                            out.push(' ');
+                        }
+                    } else if new_line || gap {
                         out.push(' ');
                     }
-                } else if new_line || gap {
-                    out.push(' ');
                 }
+                prev = Some(run);
             }
             out.push_str(&run.text);
-            prev = Some(run);
         }
         out
     }
@@ -422,6 +421,21 @@ impl PageText {
         (!text.trim().is_empty()).then_some(text)
     }
 
+    pub fn selected_glyph(
+        &self,
+        from: NormPoint,
+        to: NormPoint,
+    ) -> Option<(std::ops::Range<usize>, NormRect)> {
+        let a = self.nearest_run(from)?;
+        let b = self.nearest_run(to)?;
+        let range = a.min(b)..a.max(b) + 1;
+        let glyph = self.runs[range.clone()]
+            .iter()
+            .rev()
+            .find(|run| !run.text.trim().is_empty())?;
+        Some((range, glyph.rect))
+    }
+
     /// Resolve a drag from `from` to `to` into a [`Selection`]: the run range between
     /// the nearest glyphs (draw order ≈ reading order), its one-line quote, the
     /// occurrence index, and the rects to draw. `None` if there's no text or the
@@ -475,6 +489,31 @@ mod tests {
         // Spans from Hello's x to World's right edge.
         assert!((r.x - 0.10).abs() < 1e-4);
         assert!((r.right() - 0.32).abs() < 1e-4);
+    }
+
+    #[test]
+    fn selected_glyph_uses_logical_end_in_both_directions() {
+        let pt = PageText::new(vec![
+            run("Hello", 0.1, 0.1, 0.1, 0.02),
+            run(" ", 0.21, 0.1, 0.02, 0.02),
+            run("world", 0.1, 0.2, 0.1, 0.02),
+            run(" ", 0.21, 0.2, 0.02, 0.02),
+        ]);
+        let from = NormPoint { x: 0.11, y: 0.11 };
+        let to = NormPoint { x: 0.22, y: 0.21 };
+        let forward = pt.selected_glyph(from, to).unwrap();
+        assert_eq!(forward, pt.selected_glyph(to, from).unwrap());
+        assert_eq!(forward.0, 0..4);
+        assert_eq!(
+            forward.1,
+            NormRect {
+                x: 0.1,
+                y: 0.2,
+                w: 0.1,
+                h: 0.02
+            }
+        );
+        assert_eq!(pt.selected_text(from, to).unwrap(), "Hello\nworld");
     }
 
     #[test]

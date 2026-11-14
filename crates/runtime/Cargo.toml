@@ -19,6 +19,11 @@ image = "0.25"
 futures = "0.3"
 fs2 = "0.4"
 percent-encoding = "2"
+ureq = { version = "3", features = ["json"] }
+crossbeam-channel = "0.5"
 
 [dev-dependencies]
 markdown = "1.0.0"
+
+[features]
+test-support = []

@@ -5,11 +5,11 @@ edition = "2024"
 
 [workspace]
 members = ["crates/core", "crates/runtime"]
-exclude = ["vendor/gpui-pdf"]
+exclude = ["vendor/gpui-pdf", "vendor/gpui-base"]
 resolver = "2"
 
 [features]
-test-support = ["gpui-kit/test-support"]
+test-support = ["gpui-kit/test-support", "reader-runtime/test-support"]
 
 [dependencies]
 gpui-kit = "=0.9.1"
@@ -25,3 +25,6 @@ debug = 0
 
 [profile.test]
 debug = 0
+
+[patch.crates-io]
+gpui-base = { path = "vendor/gpui-base" }

@@ -47,6 +47,15 @@ pub fn init(cx: &mut App) {
         KeyBinding::new(keys[3], CloseBook, Some("Reader")),
         KeyBinding::new(keys[4], Quit, Some("Reader")),
         KeyBinding::new("left", Previous, Some("Reader && !Input")),
+        KeyBinding::new(
+            if cfg!(target_os = "macos") {
+                "cmd-shift-t"
+            } else {
+                "ctrl-shift-t"
+            },
+            crate::reading::translation::TranslateSelection,
+            Some("Reader"),
+        ),
         KeyBinding::new("right", Next, Some("Reader && !Input")),
         KeyBinding::new("pageup", Previous, Some("Reader && !Input")),
         KeyBinding::new("pagedown", Next, Some("Reader && !Input")),
@@ -176,6 +185,9 @@ impl ReaderApp {
             .col_selectable(false)
             .sortable(false)
         });
+        cx.set_global(crate::reading::translation::Translations(
+            reader_runtime::translation::TranslationService::new(&boot.paths.cache),
+        ));
         let mut this = Self {
             shelf_table,
             books: boot.books,
@@ -200,12 +212,23 @@ impl ReaderApp {
         for id in this.workspace.tabs.clone() {
             this.create_session(id, cx);
         }
+        this.activate_reading(cx);
         let owner = cx.weak_entity();
         window.on_window_should_close(cx, move |window, cx| {
             let _ = owner.update(cx, |this, cx| this.begin_shutdown(window, cx));
             false
         });
         this
+    }
+    fn activate_reading(&mut self, cx: &mut Context<Self>) {
+        if let Some(session) = self.workspace.active.and_then(|id| self.sessions.get(&id)) {
+            session.update(cx, |session, cx| session.activate(cx));
+        }
+    }
+    fn deactivate_reading(&mut self, cx: &mut Context<Self>) {
+        if let Some(session) = self.workspace.active.and_then(|id| self.sessions.get(&id)) {
+            session.update(cx, |session, cx| session.deactivate(cx));
+        }
     }
     pub(crate) fn create_session(&mut self, id: BookId, cx: &mut Context<Self>) {
         if self.sessions.contains_key(&id) {
@@ -230,7 +253,9 @@ impl ReaderApp {
         }
         window.focus(&self.focus, cx);
         self.create_session(id, cx);
+        self.deactivate_reading(cx);
         self.workspace.open(id);
+        self.activate_reading(cx);
         self.persist_workspace(cx);
         let revision = self.request_books();
         let job = self.service.submit(move |library| {
@@ -280,6 +305,7 @@ impl ReaderApp {
         window.focus(&self.focus, cx);
         self.retire_session(id, window, cx);
         self.workspace.close(id);
+        self.activate_reading(cx);
         self.persist_workspace(cx);
         cx.notify();
     }
@@ -543,6 +569,19 @@ impl Render for ReaderApp {
             .on_action(
                 cx.listener(|this, _: &Previous, window, cx| this.step_reading(false, window, cx)),
             )
+            .on_action(cx.listener(
+                |this, _: &crate::reading::translation::TranslateSelection, _, cx| {
+                    if let Some(session) =
+                        this.workspace.active.and_then(|id| this.sessions.get(&id))
+                    {
+                        session
+                            .read(cx)
+                            .translation
+                            .clone()
+                            .update(cx, |overlay, cx| overlay.begin(cx));
+                    }
+                },
+            ))
             .on_action(
                 cx.listener(|this, _: &Next, window, cx| this.step_reading(true, window, cx)),
             )
@@ -552,11 +591,13 @@ impl Render for ReaderApp {
                     .children(tabs)
                     .on_click(cx.listener(|this, index, window, cx| {
                         window.focus(&this.focus, cx);
+                        this.deactivate_reading(cx);
                         this.workspace.active = if *index == 0 {
                             None
                         } else {
                             this.workspace.tabs.get(index - 1).copied()
                         };
+                        this.activate_reading(cx);
                         this.persist_workspace(cx);
                         cx.notify();
                     })),

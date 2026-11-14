@@ -3,7 +3,7 @@ import pathlib
 import subprocess
 import tempfile
 import unittest
-from support import ROOT, ARTIFACTS, epub, pdf, realistic_epub, bookmarked_epub, rust_test_count
+from support import ROOT, ARTIFACTS, epub, pdf, realistic_epub, bookmarked_epub, rust_test_count, translation_epub
 
 
 class ProductionUITests(unittest.TestCase):
@@ -11,6 +11,7 @@ class ProductionUITests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="reader-ui-") as directory:
             root = pathlib.Path(directory)
             epub(root / "sample.epub")
+            translation_epub(root / "translation.epub")
             shelf = root / "responsive-shelf"
             shelf.mkdir()
             for i in range(7):
@@ -27,4 +28,4 @@ class ProductionUITests(unittest.TestCase):
             ARTIFACTS.mkdir(parents=True, exist_ok=True)
             (ARTIFACTS / "ui.log").write_text(result.stdout + result.stderr)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            self.assertEqual(rust_test_count(result.stdout), 18)
+            self.assertEqual(rust_test_count(result.stdout), 22)

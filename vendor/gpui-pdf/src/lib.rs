@@ -504,6 +504,7 @@ pub enum PdfEvent {
         fraction: f32,
     },
     LockChanged,
+    SelectionChanged,
     /// The file couldn't be read or parsed (see [`PdfView::load_error`]) —
     /// terminal for this view; the viewer shows the message in place of the
     /// loading placeholder. Also fired when a retry-unlock fails with a
@@ -1352,6 +1353,7 @@ impl PdfView {
                         None => TextSlot::Failed,
                     },
                 );
+                cx.emit(PdfEvent::SelectionChanged);
                 cx.notify();
                 // If a search is running and this was the last page to extract, fold in
                 // its matches (keeping the focused one). Doing it once at the end keeps
@@ -1793,6 +1795,27 @@ impl PdfView {
     #[cfg(feature = "markup")]
     pub fn has_page_text(&self, page: usize) -> bool {
         matches!(self.page_text.get(&page), Some(TextSlot::Ready(_)))
+    }
+    #[cfg(feature = "markup")]
+    pub fn selection_snapshot(
+        &self,
+    ) -> Option<(
+        usize,
+        std::ops::Range<usize>,
+        String,
+        gpui::Bounds<gpui::Pixels>,
+    )> {
+        let (page, a, b) = self.text_sel?;
+        let TextSlot::Ready(text) = self.page_text.get(&page)? else {
+            return None;
+        };
+        let (range, glyph) = text.selected_glyph(a, b)?;
+        let bounds = self.page_bounds(page)?;
+        let glyph = gpui::Bounds::new(
+            bounds.origin + gpui::point(bounds.size.width * glyph.x, bounds.size.height * glyph.y),
+            gpui::size(bounds.size.width * glyph.w, bounds.size.height * glyph.h),
+        );
+        Some((page, range, text.selected_text(a, b)?, glyph))
     }
     pub fn page_bounds(&self, page: usize) -> Option<gpui::Bounds<gpui::Pixels>> {
         let mut bounds = self.scroll.bounds_for_item(page)?;
@@ -2351,6 +2374,7 @@ impl Render for PdfView {
                     #[cfg(feature = "markup")]
                     {
                         this.text_sel = None;
+                        cx.emit(PdfEvent::SelectionChanged);
                         if let Some((pg, n)) = this.point_to_page(_ev.position) {
                             this.ensure_page_text(pg, cx);
                             this.sel_drag = Some((pg, n, n));
@@ -2520,6 +2544,7 @@ impl Render for PdfView {
                     // Outside highlight mode the drag just selects text to copy.
                     if !this.selecting {
                         this.text_sel = Some((pg, a, b));
+                        cx.emit(PdfEvent::SelectionChanged);
                         cx.notify();
                         return;
                     }

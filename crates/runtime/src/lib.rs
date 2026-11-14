@@ -5,3 +5,4 @@ pub mod paths;
 pub mod service;
 pub use library::Library;
 pub use paths::AppPaths;
+pub mod translation;

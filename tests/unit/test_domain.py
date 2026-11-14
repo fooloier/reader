@@ -6,7 +6,7 @@ class DomainTests(RuntimeCase):
     def test_runtime_parser_rules(self):
         result = subprocess.run(["cargo", "test", "--locked", "-p", "reader-runtime", "--lib"], cwd=ROOT, capture_output=True, text=True, timeout=120)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(rust_test_count(result.stdout), 7)
+        self.assertEqual(rust_test_count(result.stdout), 13)
 
     def test_core_builds_and_tests_independently(self):
         result = subprocess.run(["cargo", "test", "--locked", "-p", "reader-core"], cwd=ROOT, capture_output=True, text=True, timeout=120)

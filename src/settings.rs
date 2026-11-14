@@ -15,6 +15,8 @@ pub struct SettingsPane {
     format: Option<Format>,
     fonts: Entity<SelectState<Vec<SharedString>>>,
     _subscription: Subscription,
+    clearing_cache: bool,
+    cache_status: Option<String>,
 }
 impl SettingsPane {
     pub fn new(
@@ -49,6 +51,8 @@ impl SettingsPane {
             format,
             fonts,
             _subscription: subscription,
+            clearing_cache: false,
+            cache_status: None,
         }
     }
     fn changed(&mut self, cx: &mut Context<Self>) {
@@ -198,6 +202,45 @@ impl Render for SettingsPane {
                         cx,
                     ))
             })
+            .child(div().child("翻译缓存"))
+            .child(
+                Button::new("clear-translation-cache")
+                    .label("清除翻译缓存")
+                    .disabled(self.clearing_cache)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.clearing_cache = true;
+                        this.cache_status = None;
+                        let reply = cx
+                            .global::<crate::reading::translation::Translations>()
+                            .0
+                            .clear();
+                        cx.notify();
+                        cx.spawn(async move |this, cx| {
+                            let result = reply
+                                .await
+                                .unwrap_or_else(|_| Err("翻译服务已停止。".into()));
+                            let _ = this.update(cx, |this, cx| {
+                                this.clearing_cache = false;
+                                this.cache_status = Some(match result {
+                                    Ok(()) => "翻译缓存已清除".into(),
+                                    Err(error) => error,
+                                });
+                                cx.notify();
+                            });
+                        })
+                        .detach();
+                    })),
+            )
+            .children(self.cache_status.clone().map(|status| {
+                crate::controls::observed(
+                    div()
+                        .id("translation-cache-status")
+                        .role(Role::Status)
+                        .aria_label(status.clone())
+                        .text_sm()
+                        .child(status),
+                )
+            }))
             .when(self.format.is_none(), |view| {
                 view.child(
                     div()

@@ -11,6 +11,11 @@ use reader_core::{EpubSettings, Location};
 use reader_runtime::epub::EpubBook;
 use std::{cell::Cell, collections::HashMap, rc::Rc, sync::Arc};
 
+pub(super) enum EpubEvent {
+    SelectionChanging,
+    Navigated,
+}
+
 pub struct EpubPane {
     pub document: EpubBook,
     pub chapter: usize,
@@ -24,6 +29,7 @@ pub struct EpubPane {
     restore_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     last_anchor: String,
     navigation: u64,
+    subscriptions: Vec<Subscription>,
 }
 
 impl EpubPane {
@@ -76,6 +82,7 @@ impl EpubPane {
             restore_bounds: Rc::new(Cell::new(None)),
             last_anchor: String::new(),
             navigation: 0,
+            subscriptions: vec![],
         };
         pane.rebuild(cx);
         pane
@@ -87,8 +94,54 @@ impl EpubPane {
             .iter()
             .map(|b| cx.new(|cx| TextViewState::markdown(&b.markdown, cx).selectable(true)))
             .collect();
+        self.subscriptions = self
+            .texts
+            .iter()
+            .map(|text| {
+                cx.observe(text, |_, text, cx| {
+                    if text.read(cx).is_selecting() {
+                        cx.emit(EpubEvent::SelectionChanging);
+                    }
+                    cx.notify();
+                })
+            })
+            .collect();
         self.scroll = ScrollHandle::new();
         cx.notify();
+    }
+    pub(super) fn selection_snapshot(
+        &self,
+        document: reader_core::BookId,
+        cx: &App,
+    ) -> Option<super::translation::SelectionSnapshot> {
+        if self.texts.iter().any(|text| text.read(cx).is_selecting()) {
+            return None;
+        }
+        let mut selected = Vec::new();
+        let mut ranges = Vec::new();
+        let mut final_glyph = None;
+        for (block, text) in self.texts.iter().enumerate() {
+            let text = text.read(cx);
+            let value = text.selected_text();
+            if value.trim().is_empty() {
+                continue;
+            }
+            let snapshot = text.selection_snapshot()?;
+            ranges.push(super::translation::SelectionRange::Epub {
+                chapter: self.chapter,
+                block,
+                source: snapshot.source_range,
+            });
+            selected.push(snapshot.text);
+            final_glyph = Some(snapshot.final_glyph);
+        }
+        Some(super::translation::SelectionSnapshot {
+            document,
+            revision: 0,
+            text: selected.join("\n\n"),
+            ranges,
+            glyph: final_glyph?,
+        })
     }
     pub(crate) fn reading_position(&self) -> (usize, usize) {
         let chapter = &self.document.chapters[self.chapter];
@@ -114,7 +167,11 @@ impl EpubPane {
     }
     pub fn navigate(&mut self, href: &str, cx: &mut Context<Self>) {
         if let Some((chapter, block)) = self.document.destination(href) {
+            cx.emit(EpubEvent::Navigated);
             self.navigation += 1;
+            for text in &self.texts {
+                text.update(cx, |text, cx| text.clear_selection(cx));
+            }
             if self.chapter != chapter {
                 self.chapter = chapter;
                 self.rebuild(cx);
@@ -162,6 +219,7 @@ impl EpubPane {
     }
 }
 impl EventEmitter<Location> for EpubPane {}
+impl EventEmitter<EpubEvent> for EpubPane {}
 
 impl Render for EpubPane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -267,7 +325,10 @@ impl Render for EpubPane {
                     this.restore_target.set(None);
                     let entity = cx.weak_entity();
                     window.on_next_frame(move |_, cx| {
-                        let _ = entity.update(cx, |this, cx| this.changed(cx));
+                        let _ = entity.update(cx, |this, cx| {
+                            this.changed(cx);
+                            cx.notify();
+                        });
                     });
                 }))
                 .children(children)

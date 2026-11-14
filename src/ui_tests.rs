@@ -110,13 +110,17 @@ impl Harness {
                 self.cx.read(|cx| {
                     let app = self.app.read(cx);
                     format!(
-                        "status={} books={} tabs={:?} positions={:?}",
+                        "status={} books={} tabs={:?} positions={:?} selections={:?}",
                         app.status,
                         app.books.len(),
                         app.workspace.tabs,
                         app.sessions
                             .values()
                             .map(|v| v.read(cx).position.clone())
+                            .collect::<Vec<_>>(),
+                        app.sessions
+                            .values()
+                            .map(|v| v.read(cx).translation.read(cx).diagnostics(cx))
                             .collect::<Vec<_>>()
                     )
                 })
@@ -1285,4 +1289,489 @@ fn production_corrupt_state_uses_defaults_with_visible_diagnostic() {
         std::fs::read(root.join("state/workspace.json.corrupt-0")).unwrap(),
         b"broken workspace"
     );
+}
+
+enum TranslationReply {
+    Text(String),
+    Status(u16),
+}
+impl From<&str> for TranslationReply {
+    fn from(text: &str) -> Self {
+        Self::Text(text.into())
+    }
+}
+impl From<String> for TranslationReply {
+    fn from(text: String) -> Self {
+        Self::Text(text)
+    }
+}
+
+struct TranslationServer {
+    endpoint: String,
+    requests:
+        std::sync::mpsc::Receiver<(serde_json::Value, std::sync::mpsc::Sender<TranslationReply>)>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+impl TranslationServer {
+    fn new() -> Self {
+        use std::{
+            io::{Read, Write},
+            sync::{
+                Arc,
+                atomic::{AtomicBool, Ordering},
+            },
+        };
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let endpoint = format!(
+            "http://{}/v1/chat/completions",
+            listener.local_addr().unwrap()
+        );
+        let (send, requests) = std::sync::mpsc::channel();
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopped = stop.clone();
+        let thread = std::thread::spawn(move || {
+            let mut children = vec![];
+            while !stopped.load(Ordering::SeqCst) {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    std::thread::sleep(Duration::from_millis(2));
+                    continue;
+                };
+                let send = send.clone();
+                children.push(std::thread::spawn(move || {
+                    stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+                    let mut data = vec![];
+                    let mut buffer = [0; 4096];
+                    let (end, length) = loop {
+                        let n = stream.read(&mut buffer).unwrap();
+                        if n == 0 { return; }
+                        data.extend_from_slice(&buffer[..n]);
+                        if let Some(end) = data.windows(4).position(|s| s == b"\r\n\r\n") {
+                            let headers = String::from_utf8_lossy(&data[..end]).to_lowercase();
+                            let length: usize = headers.lines().find_map(|line| line.strip_prefix("content-length:")).unwrap().trim().parse().unwrap();
+                            break (end + 4, length);
+                        }
+                    };
+                    while data.len() < end + length {
+                        let n = stream.read(&mut buffer).unwrap();
+                        if n == 0 { return; }
+                        data.extend_from_slice(&buffer[..n]);
+                    }
+                    let (reply, receive) = std::sync::mpsc::channel();
+                    if send.send((serde_json::from_slice(&data[end..end+length]).unwrap(), reply)).is_err() { return; }
+                    if let Ok(content) = receive.recv_timeout(Duration::from_secs(5)) {
+                        let (status, body) = match content {
+                            TranslationReply::Text(content) => (200, serde_json::json!({"choices":[{"message":{"content":content},"finish_reason":"stop"}]}).to_string()),
+                            TranslationReply::Status(status) => (status, "{}".into()),
+                        };
+                        let _ = write!(stream, "HTTP/1.1 {status} Result\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                    }
+                }));
+            }
+            for child in children {
+                child.join().unwrap();
+            }
+        });
+        Self {
+            endpoint,
+            requests,
+            stop,
+            thread: Some(thread),
+        }
+    }
+    #[track_caller]
+    fn next(&self) -> (serde_json::Value, std::sync::mpsc::Sender<TranslationReply>) {
+        self.requests
+            .recv_timeout(Duration::from_secs(2))
+            .expect("点击应通过 Rust HTTP worker 发送请求")
+    }
+}
+impl Drop for TranslationServer {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.thread.take().unwrap().join().unwrap();
+    }
+}
+impl Harness {
+    fn translations(&mut self, server: &TranslationServer) {
+        self.cx.update(|cx| {
+            let cache = self.app.read(cx).paths.cache.clone();
+            cx.set_global(crate::reading::translation::Translations(
+                reader_runtime::translation::TranslationService::local(
+                    &cache,
+                    server.endpoint.clone(),
+                ),
+            ));
+        });
+    }
+    fn selection(&mut self, id: BookId) -> crate::reading::translation::SelectionSnapshot {
+        self.wait(|app, cx| {
+            app.sessions[&id]
+                .read(cx)
+                .translation
+                .read(cx)
+                .snapshot
+                .is_some()
+        });
+        self.cx.read(|cx| {
+            self.app.read(cx).sessions[&id]
+                .read(cx)
+                .translation
+                .read(cx)
+                .snapshot
+                .clone()
+                .unwrap()
+        })
+    }
+    fn translation_ready(&mut self, id: BookId, expected: &str) {
+        self.wait(|app, cx| matches!(&app.sessions[&id].read(cx).translation.read(cx).state, crate::reading::translation::TranslationState::Ready(text) if text.as_ref() == expected));
+    }
+    fn translation_closed(&mut self, id: BookId) {
+        self.wait(|app, cx| {
+            matches!(
+                app.sessions[&id].read(cx).translation.read(cx).state,
+                crate::reading::translation::TranslationState::Armed
+                    | crate::reading::translation::TranslationState::Idle
+            )
+        });
+        self.frame(|window, _| assert!(window.try_find("translation-result").is_none()));
+    }
+}
+
+#[test]
+fn production_epub_translation_glyph_preservation_keyboard_and_reflow() {
+    let server = TranslationServer::new();
+    let mut h = Harness::new("epub-translation");
+    h.translations(&server);
+    let id = h.import("translation.epub");
+    h.click(&format!("open-{}", id.0));
+    h.wait(|app, cx| matches!(&app.sessions[&id].read(cx).state, ReaderState::Epub(_)));
+    let mut points = (point(px(0.), px(0.)), point(px(0.), px(0.)));
+    h.frame(|window, cx| {
+        let block = window.find("epub-block-1").bounds();
+        points = (
+            block.origin + point(px(25.), px(12.)),
+            block.origin + point(px(180.), px(52.)),
+        );
+        window.drag(points.0, points.1, cx);
+    });
+    let forward = h.selection(id);
+    h.frame(|window, _| {
+        let block = window.find("epub-block-1").bounds();
+        assert!(
+            forward.glyph.top() > block.top() + px(20.),
+            "软换行末字形必须在第二行"
+        );
+        let icon = window.find("translate-selection").bounds();
+        assert!(icon.bottom() <= forward.glyph.top());
+        assert!((icon.right() - forward.glyph.right()).abs() <= px(1.));
+    });
+    assert!(server.requests.try_recv().is_err(), "选择本身不得发送请求");
+    h.frame(|window, cx| window.drag(points.1, points.0, cx));
+    let reverse = h.selection(id);
+    assert_eq!(
+        (&forward.text, &forward.ranges, forward.glyph),
+        (&reverse.text, &reverse.ranges, reverse.glyph),
+        "反向选区使用相同阅读顺序末字形"
+    );
+    assert_eq!(reverse.document, id);
+    assert!(reverse.revision > forward.revision);
+    h.click("translate-selection");
+    let (request, reply) = server.next();
+    assert!(
+        request["messages"][0]["content"]
+            .as_str()
+            .unwrap()
+            .ends_with(reverse.text.trim())
+    );
+    h.frame(|window, cx| {
+        assert_eq!(
+            gpui_kit::base::TextSelection::selected_text(window, cx),
+            reverse.text,
+            "按钮 capture 阶段不得清除高亮或选中文本"
+        );
+    });
+    reply.send("软换行译文".into()).unwrap();
+    h.translation_ready(id, "软换行译文");
+    h.click("copy-translation");
+    h.cx.read(|cx| {
+        assert_eq!(
+            cx.read_from_clipboard().and_then(|c| c.text()).as_deref(),
+            Some("软换行译文")
+        )
+    });
+    h.press("escape");
+    h.translation_closed(id);
+    h.frame(|window, cx| {
+        assert_eq!(
+            gpui_kit::base::TextSelection::selected_text(window, cx),
+            reverse.text
+        );
+        window.press("ctrl-shift-t", cx);
+    });
+    h.translation_ready(id, "软换行译文");
+    assert!(server.requests.try_recv().is_err(), "同一选区命中缓存");
+    h.press("escape");
+    for _ in 0..25 {
+        let focused =
+            h.cx.update_window(h.window, |_, window, _| {
+                window
+                    .try_find("translate-selection")
+                    .is_some_and(|button| button.focused() == Some(true))
+            })
+            .unwrap();
+        if focused {
+            break;
+        }
+        h.press("tab");
+    }
+    h.frame(|window, _| assert_eq!(window.find("translate-selection").focused(), Some(true)));
+    h.press("enter");
+    h.translation_ready(id, "软换行译文");
+    h.press("escape");
+    h.cx.simulate_window_resize(h.window, size(px(850.), px(800.)));
+    h.frame(|_, _| {});
+    let resized = h.selection(id);
+    assert_eq!(resized.text, reverse.text);
+    assert_eq!(resized.ranges, reverse.ranges);
+    assert!(server.requests.try_recv().is_err(), "重新排版不得发请求");
+    h.frame(|window, cx| {
+        window.scroll(
+            "epub-scroll",
+            gpui_kit::ScrollDelta::Pixels(point(px(0.), px(-550.))),
+            cx,
+        )
+    });
+    h.wait_window(|window| window.try_find("translate-selection").is_none());
+}
+
+#[test]
+fn production_epub_translation_cross_block_stale_and_dismissal() {
+    let server = TranslationServer::new();
+    let mut h = Harness::new("translation-stale");
+    h.translations(&server);
+    let id = h.import("translation.epub");
+    h.click(&format!("open-{}", id.0));
+    h.wait(|app, cx| matches!(&app.sessions[&id].read(cx).state, ReaderState::Epub(_)));
+    let mut points = (point(px(0.), px(0.)), point(px(0.), px(0.)));
+    h.frame(|window, cx| {
+        let first = window.find("epub-block-1").bounds();
+        let last = window.find("epub-block-2").bounds();
+        points = (
+            first.origin + point(px(25.), px(12.)),
+            last.origin + point(px(200.), px(12.)),
+        );
+        window.drag(points.0, points.1, cx);
+    });
+    let a = h.selection(id);
+    assert_eq!(a.ranges.len(), 2);
+    h.frame(|window, _| assert!(a.glyph.top() >= window.find("epub-block-2").bounds().top()));
+    h.frame(|window, cx| window.drag(points.1, points.0, cx));
+    let reverse = h.selection(id);
+    assert_eq!(
+        (&reverse.text, &reverse.ranges, reverse.glyph),
+        (&a.text, &a.ranges, a.glyph)
+    );
+    h.click("translate-selection");
+    let (_, reply_a) = server.next();
+    h.press("escape");
+    h.translation_closed(id);
+    h.frame(|window, cx| window.drag(points.1, points.1 + point(px(170.), px(0.)), cx));
+    let b = h.selection(id);
+    assert_ne!(a.text, b.text);
+    h.click("translate-selection");
+    let (_, reply_b) = server.next();
+    reply_b.send("新的 B 译文".into()).unwrap();
+    h.translation_ready(id, "新的 B 译文");
+    reply_a.send("过期 A 译文".into()).unwrap();
+    for _ in 0..10 {
+        h.frame(|_, _| {});
+    }
+    h.translation_ready(id, "新的 B 译文");
+    h.frame(|window, cx| {
+        use gpui_kit::test::TestEventExt;
+        let outside = window.find("epub-block-0").bounds().center();
+        window.pointer_down(outside, gpui_kit::MouseButton::Left, cx);
+        window.pointer_up(outside, gpui_kit::MouseButton::Left, cx);
+    });
+    h.translation_closed(id);
+    h.frame(|window, cx| window.drag(points.0, points.1, cx));
+    h.selection(id);
+    h.click("translate-selection");
+    h.translation_ready(id, "过期 A 译文");
+    h.click_label("书架");
+    h.translation_closed(id);
+    h.click(&format!("open-{}", id.0));
+    h.click("next");
+    h.wait_window(|window| window.try_find("translate-selection").is_none());
+    h.click("settings");
+    h.click("clear-translation-cache");
+    h.press("escape");
+}
+
+#[test]
+fn production_pdf_translation_final_glyph_reverse_and_close() {
+    let server = TranslationServer::new();
+    let mut h = Harness::new("pdf-translation");
+    h.translations(&server);
+    let id = h.import("sample.pdf");
+    h.click(&format!("open-{}", id.0));
+    h.wait(|app, cx| matches!(&app.sessions[&id].read(cx).state, ReaderState::Pdf(pdf) if pdf.read(cx).has_page_text(0)));
+    let bounds =
+        h.cx.read(|cx| match &h.app.read(cx).sessions[&id].read(cx).state {
+            ReaderState::Pdf(pdf) => pdf.read(cx).page_bounds(0).unwrap(),
+            _ => unreachable!(),
+        });
+    let start = bounds.origin
+        + point(
+            bounds.size.width * (42. / 600.),
+            bounds.size.height * (60. / 800.),
+        );
+    let end = bounds.origin
+        + point(
+            bounds.size.width * (480. / 600.),
+            bounds.size.height * (60. / 800.),
+        );
+    h.frame(|window, cx| window.drag(start, end, cx));
+    let a = h.selection(id);
+    assert!(a.text.contains("Reader page 1"));
+    assert!(
+        a.glyph.right() < end.x,
+        "图标必须锚定实际最后字形，而非鼠标终点"
+    );
+    h.frame(|window, _| {
+        let icon = window.find("translate-selection").bounds();
+        assert!(icon.bottom() <= a.glyph.top());
+        assert!((icon.right() - a.glyph.right()).abs() <= px(1.));
+    });
+    h.frame(|window, cx| window.drag(end, start, cx));
+    let reverse = h.selection(id);
+    assert_eq!(
+        (&reverse.text, &reverse.ranges, reverse.glyph),
+        (&a.text, &a.ranges, a.glyph)
+    );
+    h.click("translate-selection");
+    let (_, reply) = server.next();
+    assert_eq!(
+        h.cx.read(|cx| match &h.app.read(cx).sessions[&id].read(cx).state {
+            ReaderState::Pdf(pdf) => pdf.read(cx).selection_snapshot().unwrap().2,
+            _ => unreachable!(),
+        }),
+        a.text
+    );
+    reply.send("PDF 译文".into()).unwrap();
+    h.translation_ready(id, "PDF 译文");
+    h.press("escape");
+    h.translation_closed(id);
+    h.click("translate-selection");
+    h.translation_ready(id, "PDF 译文");
+    h.click("next");
+    h.wait_window(|window| window.try_find("translate-selection").is_none());
+    h.click(&format!("close-{}", id.0));
+    assert!(h.cx.read(|cx| !h.app.read(cx).sessions.contains_key(&id)));
+}
+
+#[test]
+fn production_translation_retry_long_result_and_inflight_tab_close() {
+    let server = TranslationServer::new();
+    let mut h = Harness::new("translation-retry");
+    h.translations(&server);
+    let id = h.import("sample.pdf");
+    h.click(&format!("open-{}", id.0));
+    h.wait(|app, cx| matches!(&app.sessions[&id].read(cx).state, ReaderState::Pdf(pdf) if pdf.read(cx).has_page_text(0)));
+    let bounds =
+        h.cx.read(|cx| match &h.app.read(cx).sessions[&id].read(cx).state {
+            ReaderState::Pdf(pdf) => pdf.read(cx).page_bounds(0).unwrap(),
+            _ => unreachable!(),
+        });
+    let start = bounds.origin
+        + point(
+            bounds.size.width * (42. / 600.),
+            bounds.size.height * (60. / 800.),
+        );
+    let end = bounds.origin
+        + point(
+            bounds.size.width * (480. / 600.),
+            bounds.size.height * (60. / 800.),
+        );
+    h.frame(|window, cx| window.drag(start, end, cx));
+    h.selection(id);
+    h.click("translate-selection");
+    let (_, reply) = server.next();
+    reply.send(TranslationReply::Status(429)).unwrap();
+    h.wait_window(|window| window.try_find("retry-translation").is_some());
+    h.click("retry-translation");
+    let (_, reply) = server.next();
+    let long = "这是一段较长的译文，用于验证滚动和完整复制。\n".repeat(120);
+    reply.send(long.clone().into()).unwrap();
+    h.translation_ready(id, long.trim());
+    h.frame(|window, cx| {
+        let result = window.find("translation-result").bounds();
+        assert!(result.size.height <= window.rem_size() * 64.);
+        window.scroll(
+            "translation-result",
+            gpui_kit::ScrollDelta::Pixels(point(px(0.), px(-400.))),
+            cx,
+        );
+    });
+    h.click("copy-translation");
+    h.cx.read(|cx| {
+        assert_eq!(
+            cx.read_from_clipboard().and_then(|c| c.text()).as_deref(),
+            Some(long.trim())
+        )
+    });
+    h.press("escape");
+    h.frame(|window, cx| {
+        window.scroll(
+            "pdf-reading-viewport",
+            gpui_kit::ScrollDelta::Pixels(point(px(0.), px(-80.))),
+            cx,
+        )
+    });
+    let moved = h.selection(id);
+    h.frame(|window, _| {
+        let icon = window.find("translate-selection").bounds();
+        assert!(
+            icon.top() >= moved.glyph.bottom(),
+            "阅读区顶边不足时按钮应翻到字形下方"
+        );
+    });
+    assert!(server.requests.try_recv().is_err(), "几何改变不应发起翻译");
+    h.frame(|window, cx| {
+        use gpui_kit::test::TestEventExt;
+        let blank =
+            window.find("pdf-reading-viewport").bounds().bottom_right() - point(px(80.), px(80.));
+        window.pointer_down(blank, gpui_kit::MouseButton::Left, cx);
+        window.pointer_up(blank, gpui_kit::MouseButton::Left, cx);
+    });
+    h.wait_window(|window| window.try_find("translate-selection").is_none());
+    h.frame(|window, cx| {
+        window.drag(
+            start - point(px(0.), px(80.)),
+            moved.glyph.center() - point(px(60.), px(0.)),
+            cx,
+        )
+    });
+    assert_ne!(h.selection(id).text, moved.text);
+    h.click("translate-selection");
+    let (_, reply) = server.next();
+    h.click_label("书架");
+    h.translation_closed(id);
+    h.click(&format!("close-{}", id.0));
+    assert!(h.cx.read(|cx| !h.app.read(cx).sessions.contains_key(&id)));
+    reply.send("关闭后到达的译文".into()).unwrap();
+    for _ in 0..10 {
+        h.frame(|_, _| {});
+    }
+    h.frame(|window, _| assert!(window.try_find("translation-result").is_none()));
+    h.click("settings");
+    h.click("clear-translation-cache");
+    h.wait_window(|window| {
+        window
+            .try_find("translation-cache-status")
+            .is_some_and(|status| status.label() == Some("翻译缓存已清除"))
+    });
+    h.press("escape");
 }

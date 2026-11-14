@@ -1,6 +1,7 @@
 mod bookmarks;
 mod epub;
 mod images;
+pub(crate) mod translation;
 pub(crate) use bookmarks::BookmarkDestination;
 pub use epub::EpubPane;
 use gpui_kit::{component::ActiveTheme, prelude::*, *};
@@ -27,6 +28,7 @@ pub struct ReadingSession {
     pdf_style: Rc<RefCell<PdfStyle>>,
     closed: bool,
     settings: Settings,
+    pub(crate) translation: Entity<translation::TranslationOverlay>,
 }
 impl ReadingSession {
     pub fn new(
@@ -36,6 +38,11 @@ impl ReadingSession {
         service: Service,
         cx: &mut Context<Self>,
     ) -> Self {
+        let translations = cx
+            .global::<crate::reading::translation::Translations>()
+            .0
+            .clone();
+        let translation = cx.new(|_| translation::TranslationOverlay::new(book.id, translations));
         let position = book.location.clone();
         let pdf_style = Rc::new(RefCell::new(style(cx)));
         let mut session = Self {
@@ -49,6 +56,7 @@ impl ReadingSession {
             pdf_style: pdf_style.clone(),
             closed: false,
             settings: settings.clone(),
+            translation,
         };
         let path = paths.books().join(&book.filename);
         match book.format {
@@ -70,7 +78,13 @@ impl ReadingSession {
                 });
                 session
                     .subscriptions
-                    .push(cx.subscribe(&pdf, |this, _, event, cx| {
+                    .push(cx.subscribe(&pdf, |this, pdf, event, cx| {
+                        if matches!(event, PdfEvent::SelectionChanged)
+                            && pdf.read(cx).selection_snapshot().is_none()
+                        {
+                            this.translation
+                                .update(cx, |overlay, cx| overlay.invalidate(cx));
+                        }
                         if let PdfEvent::ViewportChanged { page, fraction } = event {
                             this.record(
                                 Location::Pdf {
@@ -103,21 +117,34 @@ impl ReadingSession {
                                         cx,
                                     )
                                 });
-                                this.subscriptions.push(
-                                    cx.subscribe(&pane, |this, _, location, cx| {
+                                this.subscriptions.push(cx.subscribe(
+                                    &pane,
+                                    |this, _, location: &Location, cx| {
                                         this.record(location.clone(), cx)
-                                    }),
-                                );
+                                    },
+                                ));
+                                this.subscriptions.push(cx.subscribe(
+                                    &pane,
+                                    |this, _, _: &epub::EpubEvent, cx| {
+                                        this.translation
+                                            .update(cx, |overlay, cx| overlay.invalidate(cx));
+                                    },
+                                ));
                                 ReaderState::Epub(pane)
                             }
                             Err(e) => ReaderState::Failed(e.to_string()),
                         };
+                        this.translation
+                            .update(cx, |overlay, cx| overlay.attach(&this.state, cx));
                         cx.notify();
                     });
                 })
                 .detach();
             }
         }
+        session
+            .translation
+            .update(cx, |overlay, cx| overlay.attach(&session.state, cx));
         session
     }
     fn record(&mut self, position: Location, cx: &mut Context<Self>) {
@@ -166,7 +193,19 @@ impl ReadingSession {
             }
             pdf.update(cx, |v, cx| v.release(window, cx));
         }
+        self.translation
+            .update(cx, |overlay, cx| overlay.deactivate(cx));
         self.closed = true;
+    }
+    pub(crate) fn activate(&mut self, cx: &mut Context<Self>) {
+        if !self.closed {
+            self.translation
+                .update(cx, |overlay, cx| overlay.activate(cx));
+        }
+    }
+    pub(crate) fn deactivate(&mut self, cx: &mut Context<Self>) {
+        self.translation
+            .update(cx, |overlay, cx| overlay.deactivate(cx));
     }
     pub fn step(&mut self, forward: bool, cx: &mut Context<Self>) {
         if !self.can_step(forward, cx) {
@@ -226,13 +265,19 @@ fn style(cx: &App) -> PdfStyle {
 }
 impl Render for ReadingSession {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let translation = self.translation.clone();
         let content = match &self.state {
             ReaderState::Loading => div().p_6().child("正在打开书籍…").into_any_element(),
             ReaderState::Failed(e) => div()
                 .p_6()
                 .child(format!("无法打开书籍：{e}"))
                 .into_any_element(),
-            ReaderState::Pdf(v) => v.clone().into_any_element(),
+            ReaderState::Pdf(v) => crate::controls::observed(
+                div()
+                    .id("pdf-reading-viewport")
+                    .size_full()
+                    .child(v.clone()),
+            ),
             ReaderState::Epub(v) => v.clone().into_any_element(),
         };
         div()
@@ -240,6 +285,13 @@ impl Render for ReadingSession {
             .flex()
             .flex_col()
             .children(self.error.clone().map(|e| div().px_4().child(e)))
-            .child(div().flex_1().min_h_0().child(content))
+            .child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .child(content)
+                    .child(translation),
+            )
     }
 }

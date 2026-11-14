@@ -14,7 +14,7 @@ ARTIFACTS = ROOT / "target/test-results"
 
 
 def rust_test_count(output):
-    results = re.findall(r"^test result: ok\. (\d+) passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;", output, re.MULTILINE)
+    results = re.findall(r"^test result: ok\. (\d+) passed; 0 failed; \d+ ignored; 0 measured; 0 filtered out;", output, re.MULTILINE)
     if not results:
         raise AssertionError("没有完整的 Rust 成功测试摘要")
     return sum(map(int, results))
@@ -145,3 +145,15 @@ class RuntimeCase(unittest.TestCase):
         result = self.command(op="import", paths=[str(source)])
         self.assertEqual(result[0]["status"], "imported", result)
         return source, result[0]["id"]
+
+
+def translation_epub(path):
+    epub(path, title="选区翻译")
+    with zipfile.ZipFile(path) as archive:
+        entries = {name: archive.read(name) for name in archive.namelist()}
+    first = "Soft wrapped text keeps the final selected glyph on its actual line. " * 4
+    rest = "".join(f'<p id="extra{i}">Additional paragraph {i}. More reading text for scrolling.</p>' for i in range(60))
+    entries["OPS/one.xhtml"] = f'<html xmlns="http://www.w3.org/1999/xhtml"><body><h1>Translation</h1><p id="first">{first}</p><p id="last">Second block alpha beta gamma delta omega.</p>{rest}</body></html>'.encode()
+    with zipfile.ZipFile(path, "w") as archive:
+        for name, data in entries.items():
+            archive.writestr(name, data)
