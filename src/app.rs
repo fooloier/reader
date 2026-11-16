@@ -17,7 +17,7 @@ use gpui_kit::{
 };
 use reader_core::{Appearance, Book, BookId, Settings, ShelfLayout, Workspace};
 use reader_runtime::{AppPaths, Library, service::Service};
-use std::{collections::HashMap, path::PathBuf};
+use std::{collections::HashMap, path::PathBuf, time::Duration};
 
 actions!(
     reader,
@@ -90,12 +90,19 @@ pub(crate) enum Shutdown {
     Saved,
 }
 
+const STATUS_DURATION: Duration = Duration::from_secs(8);
+
+struct StatusMessage {
+    text: String,
+    _expiry: Task<()>,
+}
+
 pub struct ReaderApp {
     pub books: Vec<Book>,
     pub settings: Settings,
     pub workspace: Workspace,
     pub sessions: HashMap<BookId, Entity<ReadingSession>>,
-    pub status: String,
+    status: Option<StatusMessage>,
     pub busy: bool,
     pub paths: AppPaths,
     pub service: Service,
@@ -113,6 +120,28 @@ pub struct ReaderApp {
 }
 
 impl ReaderApp {
+    #[cfg(all(test, feature = "test-support"))]
+    pub(crate) fn status_text(&self) -> &str {
+        self.status
+            .as_ref()
+            .map_or("", |status| status.text.as_str())
+    }
+    pub(crate) fn show_status(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
+        self.status = None;
+        let expiry = cx.background_executor().timer(STATUS_DURATION);
+        self.status = Some(StatusMessage {
+            text: text.into(),
+            _expiry: cx.spawn(async move |this, cx| {
+                expiry.await;
+                let _ = this.update(cx, |this, cx| this.clear_status(cx));
+            }),
+        });
+        cx.notify();
+    }
+    fn clear_status(&mut self, cx: &mut Context<Self>) {
+        self.status = None;
+        cx.notify();
+    }
     pub(crate) fn step_reading(
         &mut self,
         forward: bool,
@@ -194,7 +223,7 @@ impl ReaderApp {
             settings: boot.settings,
             workspace: boot.workspace,
             sessions: HashMap::new(),
-            status: boot.diagnostics.join("；"),
+            status: None,
             busy: false,
             paths: boot.paths,
             service: boot.service,
@@ -209,6 +238,9 @@ impl ReaderApp {
             sheet_subscription: None,
             overlay: None,
         };
+        if !boot.diagnostics.is_empty() {
+            this.show_status(boot.diagnostics.join("；"), cx);
+        }
         for id in this.workspace.tabs.clone() {
             this.create_session(id, cx);
         }
@@ -267,7 +299,7 @@ impl ReaderApp {
             let _ = this.update(cx, |this, cx| {
                 match result {
                     Ok(books) => this.apply_books(revision, books, cx),
-                    Err(error) => this.status = format!("更新书架失败：{error}"),
+                    Err(error) => this.show_status(format!("更新书架失败：{error}"), cx),
                 }
                 cx.notify();
             });
@@ -366,7 +398,10 @@ impl ReaderApp {
                     }
                     Err(error) => {
                         this.shutdown = Shutdown::Running;
-                        this.status = format!("退出保存失败：{error}。请检查数据目录后重试退出。");
+                        this.show_status(
+                            format!("退出保存失败：{error}。请检查数据目录后重试退出。"),
+                            cx,
+                        );
                         for id in this.workspace.tabs.clone() {
                             this.create_session(id, cx);
                         }
@@ -393,8 +428,7 @@ impl ReaderApp {
         cx.spawn(async move |this, cx| {
             if let Err(e) = job.await {
                 let _ = this.update(cx, |this, cx| {
-                    this.status = format!("操作失败：{e}");
-                    cx.notify();
+                    this.show_status(format!("操作失败：{e}"), cx);
                 });
             }
         })
@@ -449,8 +483,7 @@ impl ReaderApp {
             Ok(Ok(None)) => {}
             error => {
                 let _ = this.update(cx, |this, cx| {
-                    this.status = format!("无法打开文件选择器：{error:?}");
-                    cx.notify();
+                    this.show_status(format!("无法打开文件选择器：{error:?}"), cx);
                 });
             }
         })
@@ -461,8 +494,7 @@ impl ReaderApp {
             return;
         }
         self.busy = true;
-        self.status = "正在导入书籍…".into();
-        cx.notify();
+        self.show_status("正在导入书籍…", cx);
         let revision = self.request_books();
         let job = self.service.submit(move |library| {
             let results = library.import(&paths);
@@ -487,13 +519,13 @@ impl ReaderApp {
                                     .map(|e| format!("{}：{e}", r.path.display()))
                             })
                             .collect::<Vec<_>>();
-                        this.status = format!(
+                        this.show_status(format!(
                             "已导入 {imported} 本，跳过 {duplicates} 本重复书籍及 {skipped} 项非书籍或嵌套链接，失败 {} 项。{}",
                             failures.len(),
                             failures.join("；")
-                        );
+                        ), cx);
                     }
-                    Err(e) => this.status = format!("导入失败：{e}"),
+                    Err(e) => this.show_status(format!("导入失败：{e}"), cx),
                 }
                 cx.notify();
             });
@@ -604,15 +636,29 @@ impl Render for ReaderApp {
             )
             .child(self.toolbar(cx))
             .child(div().flex_1().min_h_0().child(content))
-            .when(!self.status.is_empty(), |view| {
+            .when_some(self.status.as_ref(), |view, status| {
                 view.child(
-                    div()
+                    h_flex()
+                        .flex_shrink_0()
                         .px_4()
                         .py_2()
-                        .text_sm()
-                        .max_h_24()
-                        .overflow_hidden()
-                        .child(self.status.clone()),
+                        .gap_2()
+                        .child(crate::controls::observed(
+                            div()
+                                .id("app-status")
+                                .role(Role::Status)
+                                .aria_label(status.text.clone())
+                                .flex_1()
+                                .min_w_0()
+                                .text_sm()
+                                .max_h_24()
+                                .overflow_hidden()
+                                .child(status.text.clone()),
+                        ))
+                        .child(
+                            icon("dismiss-status", IconName::Close, "关闭状态消息")
+                                .on_click(cx.listener(|this, _, _, cx| this.clear_status(cx))),
+                        ),
                 )
             })
             .into_any_element()

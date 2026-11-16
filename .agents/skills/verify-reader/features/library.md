@@ -18,6 +18,7 @@ Preconditions: 从 Launch 的空隔离目录和生成夹具开始。
 - 执行：`python3 .agents/skills/verify-reader/scripts/verify.py ui`，检查日志中的 `production_folder_import_failure_feedback_and_delete_open_book、production_rename_delete_and_keyboard_tabs、production_shelf_table_resize_and_row_commands` 全部通过。
 - 动作：点击 import-files 或 import-folder，返回夹具路径；通过 book-menu-{id} 或行右键选择 重命名… / 删除…；rename-title 输入，ok 确认或 cancel 取消。
 - 结果：导入成功和失败统计可见；取消保留书籍；确认删除移除书籍与打开标签；源文件完整。
+- 状态消息：运行 `production_status_dismissal_keeps_import_running_and_supports_keyboard` 和 `production_status_expiry_restarts_for_replacement_and_identical_messages`，验证点击和 Tab/Enter 关闭、后台导入继续执行、消息替换及重复消息重新计时。
 - 涉及磁盘结果时执行 `python3 .agents/skills/verify-reader/scripts/verify.py integration`；原生窗口证据使用 `native`。
 
 ## Gotchas

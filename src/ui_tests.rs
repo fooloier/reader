@@ -74,6 +74,11 @@ impl Harness {
             .unwrap();
         self.cx.run_until_parked();
     }
+    fn advance(&mut self, duration: Duration) {
+        self.cx.background_executor.advance_clock(duration);
+        self.cx.run_until_parked();
+        self.frame(|_, _| {});
+    }
     fn click(&mut self, id: &str) {
         self.frame(|window, cx| window.click(gpui_kit::SharedString::from(id.to_owned()), cx));
     }
@@ -111,7 +116,7 @@ impl Harness {
                     let app = self.app.read(cx);
                     format!(
                         "status={} books={} tabs={:?} positions={:?} selections={:?}",
-                        app.status,
+                        app.status_text(),
                         app.books.len(),
                         app.workspace.tabs,
                         app.sessions
@@ -1126,6 +1131,109 @@ fn production_pdf_bookmarks_and_focused_viewer_share_navigation() {
 }
 
 #[test]
+fn production_status_dismissal_keeps_import_running_and_supports_keyboard() {
+    let mut h = Harness::new("status-dismissal");
+    h.frame(|window, _| {
+        assert!(window.try_find("app-status").is_none());
+        assert!(window.try_find("dismiss-status").is_none());
+    });
+    let service = h.cx.read(|cx| h.app.read(cx).service.clone());
+    let (release, blocked) = std::sync::mpsc::channel();
+    let pending = service.submit(move |_| {
+        blocked.recv().unwrap();
+        Ok(())
+    });
+    h.click("import-files");
+    let root = PathBuf::from(std::env::var("READER_UI_ROOT").unwrap());
+    h.cx.simulate_path_prompt_response(|_| Some(vec![root.join("sample.epub")]));
+    h.wait(|app, _| app.busy);
+    h.frame(|window, _| {
+        assert_eq!(window.find("app-status").label(), Some("正在导入书籍…"));
+        let close = window.find("dismiss-status");
+        assert_eq!(close.label(), Some("关闭状态消息"));
+        assert!(close.visible());
+        assert!(close.bounds().left() >= window.find("app-status").bounds().right());
+    });
+    h.advance(Duration::from_secs(6));
+    h.click("dismiss-status");
+    h.frame(|window, _| {
+        assert!(window.try_find("app-status").is_none());
+        assert!(window.try_find("dismiss-status").is_none());
+    });
+    assert!(h.cx.read(|cx| h.app.read(cx).busy));
+    release.send(()).unwrap();
+    futures::executor::block_on(pending).unwrap();
+    h.wait(|app, _| !app.busy && app.books.len() == 1);
+    h.advance(Duration::from_secs(2));
+    h.frame(|window, _| {
+        assert!(
+            window
+                .find("app-status")
+                .label()
+                .unwrap()
+                .contains("已导入 1 本")
+        );
+    });
+    for _ in 0..25 {
+        let focused =
+            h.cx.update_window(h.window, |_, window, _| {
+                window.find("dismiss-status").focused() == Some(true)
+            })
+            .unwrap();
+        if focused {
+            break;
+        }
+        h.press("tab");
+    }
+    h.frame(|window, _| assert_eq!(window.find("dismiss-status").focused(), Some(true)));
+    h.press("enter");
+    h.frame(|window, _| {
+        assert!(window.try_find("app-status").is_none());
+        assert!(window.try_find("dismiss-status").is_none());
+    });
+}
+
+#[test]
+fn production_status_expiry_restarts_for_replacement_and_identical_messages() {
+    let mut h = Harness::new("status-expiry");
+    h.import("sample.epub");
+    h.advance(Duration::from_secs(6));
+    h.frame(|window, _| {
+        assert!(
+            window
+                .find("app-status")
+                .label()
+                .unwrap()
+                .contains("已导入 1 本")
+        );
+    });
+    let path =
+        h.cx.read(|cx| h.app.read(cx).paths.config.join("settings.json"));
+    std::fs::create_dir(&path).unwrap();
+    h.click("theme");
+    h.wait(|app, _| app.status_text().contains("操作失败"));
+    let message = h.cx.read(|cx| h.app.read(cx).status_text().to_owned());
+    h.advance(Duration::from_secs(2));
+    h.frame(|window, _| assert_eq!(window.find("app-status").label(), Some(message.as_str())));
+    h.advance(Duration::from_secs(4));
+    h.click("theme");
+    let service = h.cx.read(|cx| h.app.read(cx).service.clone());
+    futures::executor::block_on(service.submit(|_| Ok(()))).unwrap();
+    h.cx.run_until_parked();
+    h.frame(|window, _| assert_eq!(window.find("app-status").label(), Some(message.as_str())));
+    h.advance(Duration::from_secs(2));
+    h.frame(|window, _| assert_eq!(window.find("app-status").label(), Some(message.as_str())));
+    h.advance(Duration::from_millis(5999));
+    h.frame(|window, _| assert!(window.find("app-status").visible()));
+    h.advance(Duration::from_millis(1));
+    h.frame(|window, _| {
+        assert!(window.try_find("app-status").is_none());
+        assert!(window.try_find("dismiss-status").is_none());
+    });
+    assert!(h.cx.read(|cx| h.app.read(cx).status_text().is_empty()));
+}
+
+#[test]
 fn production_folder_import_failure_feedback_and_delete_open_book() {
     let mut h = Harness::new("folder");
     let root = PathBuf::from(std::env::var("READER_UI_ROOT").unwrap());
@@ -1141,7 +1249,7 @@ fn production_folder_import_failure_feedback_and_delete_open_book() {
     });
     h.wait(|app, _| !app.busy && app.books.len() == 1);
     h.cx.read(|cx| {
-        let status = &h.app.read(cx).status;
+        let status = h.app.read(cx).status_text();
         assert!(
             status.contains("1 项非书籍")
                 && status.contains("失败 1 项")
@@ -1198,7 +1306,7 @@ fn production_failed_rename_keeps_latest_position_and_original() {
         window.input("失败书名", cx);
         window.click("ok", cx);
     });
-    h.wait(|app, _| app.status.contains("重命名失败"));
+    h.wait(|app, _| app.status_text().contains("重命名失败"));
     assert!(original.is_file());
     h.click(&format!("open-{}", id.0));
     h.wait(|app,cx| match &app.sessions[&id].read(cx).state { ReaderState::Epub(pane) => matches!(pane.read(cx).location(), reader_core::Location::Epub { anchor, .. } if anchor == "p30"), _ => false });
@@ -1256,7 +1364,7 @@ fn production_quit_save_failure_stays_open_and_can_retry() {
     std::fs::create_dir(&path).unwrap();
     h.frame(|window, cx| window.press("secondary-q", cx));
     h.wait(|app, _| {
-        app.shutdown == crate::app::Shutdown::Running && app.status.contains("退出保存失败")
+        app.shutdown == crate::app::Shutdown::Running && app.status_text().contains("退出保存失败")
     });
     std::fs::remove_dir(&path).unwrap();
     h.frame(|window, cx| window.press("secondary-q", cx));
@@ -1274,12 +1382,32 @@ fn production_corrupt_state_uses_defaults_with_visible_diagnostic() {
     let mut h = Harness::new("corrupt-state");
     h.cx.read(|cx| {
         let app = h.app.read(cx);
-        assert!(app.status.contains("已损坏，使用默认值"));
-        assert!(app.status.contains("settings.json.corrupt-0"));
-        assert!(app.status.contains("workspace.json.corrupt-0"));
+        assert!(app.status_text().contains("已损坏，使用默认值"));
+        assert!(app.status_text().contains("settings.json.corrupt-0"));
+        assert!(app.status_text().contains("workspace.json.corrupt-0"));
         assert_eq!(app.settings.epub.font, ".SystemUIFont");
         assert!(app.workspace.tabs.is_empty());
     });
+    h.cx.simulate_window_resize(h.window, size(px(680.), px(480.)));
+    h.cx.update(|cx| gpui_kit::component::Theme::update(cx, |theme| theme.font_size = px(22.)));
+    h.advance(Duration::from_millis(7999));
+    h.frame(|window, _| {
+        let status = window.find("app-status");
+        let close = window.find("dismiss-status");
+        assert!(close.bounds().left() >= status.bounds().right());
+        assert!(close.bounds().right() <= px(680.));
+        assert!(close.bounds().bottom() <= px(480.));
+        assert!(
+            window
+                .find("app-status")
+                .label()
+                .unwrap()
+                .contains("已损坏，使用默认值")
+        );
+        assert!(window.find("dismiss-status").visible());
+    });
+    h.advance(Duration::from_millis(1));
+    h.frame(|window, _| assert!(window.try_find("app-status").is_none()));
     h.click("settings");
     h.frame(|window, _| assert!(window.find("settings-theme").visible()));
     assert_eq!(

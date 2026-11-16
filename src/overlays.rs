@@ -71,7 +71,7 @@ impl ReaderApp {
                             let _ = this.update(cx, |this, cx| {
                                 match result {
                                     Ok(books) => this.apply_books(revision, books, cx),
-                                    Err(e) => this.status = format!("重命名失败：{e}"),
+                                    Err(e) => this.show_status(format!("重命名失败：{e}"), cx),
                                 }
                                 if was_open
                                     && this.workspace.tabs.contains(&id)
@@ -118,7 +118,7 @@ impl ReaderApp {
                             let _ = this.update(cx, |this, cx| {
                                 match result {
                                     Ok(books) => this.apply_books(revision, books, cx),
-                                    Err(e) => this.status = format!("删除失败：{e}"),
+                                    Err(e) => this.show_status(format!("删除失败：{e}"), cx),
                                 }
                                 cx.notify();
                             });
