@@ -15,8 +15,8 @@
 
 ## 选中翻译宿主接口
 
-`PageText::selected_glyph` 与选中文本共用 nearest-run 区间，返回阅读顺序最后的非空白 run。`PdfView::selection_snapshot` 将该字形映射到窗口坐标；`PdfEvent::SelectionChanged` 在开始清空、完成选择和延迟提取结束时通知宿主。仍使用原有单页绘制顺序近似，不扩展复杂 PDF 阅读排序。
+`PdfView::selection_snapshot` 只读取已提交选区的页码和文本；`is_selection_pending` 区分尚在提取文字的选区，`scroll_offset` 供宿主检测视口变化。滚动条滑块遮挡下层阅读命中，避免将滚动条拖动误识别为正文选择。`PdfEvent::SelectionChanged` 在开始清空、完成选择和延迟提取结束时通知宿主。释放点、快照代次和翻译请求由 Reader 持有，不在 PDF 层维护字形锚点。仍使用原有单页绘制顺序近似，不扩展复杂 PDF 阅读排序，也不扩展阅读根区域外释放行为。
 
-升级时保留 `text.rs` 的反向、多行与尾空白测试，并运行 Reader 的 `production_pdf_translation_final_glyph_reverse_and_close`。
+升级时保留 `text.rs` 的多行与尾空白测试，并运行 Reader 的 `production_pdf_translation_release_reverse_and_close`。
 
 选中文本拼接在显式空白 run 前后保留最后真实字形的基线，避免跨行空白吞掉换行。

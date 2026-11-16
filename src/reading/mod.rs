@@ -42,7 +42,7 @@ impl ReadingSession {
             .global::<crate::reading::translation::Translations>()
             .0
             .clone();
-        let translation = cx.new(|_| translation::TranslationOverlay::new(book.id, translations));
+        let translation = cx.new(|_| translation::TranslationOverlay::new(translations));
         let position = book.location.clone();
         let pdf_style = Rc::new(RefCell::new(style(cx)));
         let mut session = Self {
@@ -78,13 +78,7 @@ impl ReadingSession {
                 });
                 session
                     .subscriptions
-                    .push(cx.subscribe(&pdf, |this, pdf, event, cx| {
-                        if matches!(event, PdfEvent::SelectionChanged)
-                            && pdf.read(cx).selection_snapshot().is_none()
-                        {
-                            this.translation
-                                .update(cx, |overlay, cx| overlay.invalidate(cx));
-                        }
+                    .push(cx.subscribe(&pdf, |this, _, event, cx| {
                         if let PdfEvent::ViewportChanged { page, fraction } = event {
                             this.record(
                                 Location::Pdf {
@@ -170,6 +164,10 @@ impl ReadingSession {
         }));
     }
     pub fn configure(&mut self, settings: &Settings, cx: &mut Context<Self>) {
+        if self.settings != *settings {
+            self.translation
+                .update(cx, |overlay, cx| overlay.invalidate(cx));
+        }
         self.settings = settings.clone();
         *self.pdf_style.borrow_mut() = style(cx);
         match &self.state {
@@ -211,6 +209,8 @@ impl ReadingSession {
         if !self.can_step(forward, cx) {
             return;
         }
+        self.translation
+            .update(cx, |overlay, cx| overlay.invalidate(cx));
         match &self.state {
             ReaderState::Pdf(pdf) => pdf.update(cx, |v, cx| {
                 if forward {
@@ -264,8 +264,9 @@ fn style(cx: &App) -> PdfStyle {
     }
 }
 impl Render for ReadingSession {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let translation = self.translation.clone();
+        let reading_area = translation.read(cx).reading_area();
         let content = match &self.state {
             ReaderState::Loading => div().p_6().child("正在打开书籍…").into_any_element(),
             ReaderState::Failed(e) => div()
@@ -290,6 +291,7 @@ impl Render for ReadingSession {
                     .relative()
                     .flex_1()
                     .min_h_0()
+                    .child(reading_area)
                     .child(content)
                     .child(translation),
             )

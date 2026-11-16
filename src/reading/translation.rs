@@ -1,6 +1,5 @@
 use super::{EpubPane, ReaderState};
 use gpui_kit::{
-    base::TextSelection,
     component::{
         ActiveTheme, IconName, Sizable,
         button::{Button, ButtonVariant, ButtonVariants},
@@ -10,40 +9,35 @@ use gpui_kit::{
     prelude::*,
     *,
 };
-use gpui_pdf::PdfView;
-use reader_core::BookId;
+use gpui_pdf::{PdfEvent, PdfView};
 use reader_runtime::translation::TranslationService;
-use std::{ops::Range, sync::Arc};
+use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
+    sync::Arc,
+};
 
 actions!(reader_translation, [TranslateSelection]);
 
 pub(crate) struct Translations(pub TranslationService);
 impl Global for Translations {}
 
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) enum SelectionRange {
-    Pdf {
-        page: usize,
-        runs: Range<usize>,
-    },
-    Epub {
-        chapter: usize,
-        block: usize,
-        source: Range<usize>,
-    },
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum SelectionAnchor {
+    Pointer(Point<Pixels>),
+    Viewport,
 }
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct SelectionSnapshot {
-    pub document: BookId,
-    pub revision: u64,
     pub text: String,
-    pub ranges: Vec<SelectionRange>,
-    pub glyph: Bounds<Pixels>,
+    pub anchor: SelectionAnchor,
+    pub generation: u64,
 }
-impl SelectionSnapshot {
-    fn same_selection(&self, other: &Self) -> bool {
-        self.document == other.document && self.text == other.text && self.ranges == other.ranges
-    }
+enum Capture {
+    Idle,
+    Pressed,
+    AwaitingPdfText(SelectionAnchor),
+    Offered(SelectionSnapshot),
 }
 #[derive(Clone)]
 enum Source {
@@ -51,19 +45,16 @@ enum Source {
     Epub(Entity<EpubPane>),
 }
 impl Source {
-    fn snapshot(&self, document: BookId, cx: &App) -> Option<SelectionSnapshot> {
+    fn selected_text(&self, cx: &App) -> Option<String> {
         match self {
-            Self::Pdf(pdf) => {
-                let (page, runs, text, glyph) = pdf.read(cx).selection_snapshot()?;
-                Some(SelectionSnapshot {
-                    document,
-                    revision: 0,
-                    text,
-                    ranges: vec![SelectionRange::Pdf { page, runs }],
-                    glyph,
-                })
-            }
-            Self::Epub(pane) => pane.read(cx).selection_snapshot(document, cx),
+            Self::Pdf(pdf) => pdf.read(cx).selection_snapshot().map(|(_, text)| text),
+            Self::Epub(pane) => pane.read(cx).selected_text(cx),
+        }
+    }
+    fn offset(&self, cx: &App) -> Point<Pixels> {
+        match self {
+            Self::Pdf(pdf) => pdf.read(cx).scroll_offset(),
+            Self::Epub(pane) => pane.read(cx).scroll.offset(),
         }
     }
 }
@@ -80,60 +71,85 @@ impl TranslationState {
         matches!(self, Self::Loading | Self::Ready(_) | Self::Failed(_))
     }
 }
+#[derive(Clone, Copy, PartialEq)]
+struct Viewport {
+    bounds: Bounds<Pixels>,
+    offset: Point<Pixels>,
+    rem: Pixels,
+    zoom: f32,
+}
 pub(crate) struct TranslationOverlay {
-    document: BookId,
     source: Option<Source>,
-    pub snapshot: Option<SelectionSnapshot>,
+    capture: Capture,
     pub state: TranslationState,
     generation: u64,
-    revision: u64,
     active: bool,
-    viewport: Bounds<Pixels>,
+    viewport: Rc<Cell<Option<Viewport>>>,
+    hitbox: Rc<RefCell<Option<Hitbox>>>,
     service: TranslationService,
-    subscriptions: Vec<Subscription>,
+    subscription: Option<Subscription>,
 }
 impl TranslationOverlay {
-    pub fn new(document: BookId, service: TranslationService) -> Self {
+    pub fn new(service: TranslationService) -> Self {
         Self {
-            document,
             source: None,
-            snapshot: None,
+            capture: Capture::Idle,
             state: TranslationState::Idle,
             generation: 0,
-            revision: 0,
             active: false,
-            viewport: Bounds::default(),
+            viewport: Rc::new(Cell::new(None)),
+            hitbox: Rc::new(RefCell::new(None)),
             service,
-            subscriptions: vec![],
+            subscription: None,
         }
     }
+    pub fn reading_area(&self) -> AnyElement {
+        let hitbox = self.hitbox.clone();
+        canvas(
+            move |bounds, window, _| {
+                hitbox.replace(Some(window.insert_hitbox(bounds, HitboxBehavior::Normal)));
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+        .into_any_element()
+    }
     pub fn attach(&mut self, state: &ReaderState, cx: &mut Context<Self>) {
-        self.subscriptions.clear();
+        self.subscription = None;
         self.source = match state {
             ReaderState::Pdf(pdf) => {
-                self.subscriptions
-                    .push(cx.observe(pdf, |_, _, cx| cx.notify()));
+                self.subscription = Some(cx.subscribe(pdf, |this, _, event, cx| {
+                    if matches!(event, PdfEvent::SelectionChanged)
+                        && let Capture::AwaitingPdfText(anchor) = this.capture
+                    {
+                        this.capture_text(anchor, cx);
+                    }
+                }));
                 Some(Source::Pdf(pdf.clone()))
             }
-            ReaderState::Epub(pane) => {
-                self.subscriptions
-                    .push(cx.observe(pane, |_, _, cx| cx.notify()));
-                Some(Source::Epub(pane.clone()))
-            }
+            ReaderState::Epub(pane) => Some(Source::Epub(pane.clone())),
             _ => None,
         };
         cx.notify();
     }
+    pub fn snapshot(&self) -> Option<&SelectionSnapshot> {
+        match &self.capture {
+            Capture::Offered(snapshot) => Some(snapshot),
+            _ => None,
+        }
+    }
     pub fn invalidate(&mut self, cx: &mut Context<Self>) {
         self.generation += 1;
-        self.revision += 1;
-        self.snapshot = None;
+        self.capture = Capture::Idle;
         self.state = TranslationState::Idle;
         cx.notify();
     }
     pub fn deactivate(&mut self, cx: &mut Context<Self>) {
         self.active = false;
-        self.sync(None, self.viewport, cx);
+        self.invalidate(cx);
     }
     pub fn activate(&mut self, cx: &mut Context<Self>) {
         if !self.active {
@@ -144,56 +160,53 @@ impl TranslationOverlay {
     #[cfg(all(test, feature = "test-support"))]
     pub fn diagnostics(&self, cx: &App) -> String {
         format!(
-            "active={} viewport={:?} source={:?} snapshot={:?}",
+            "active={} generation={} source={:?} snapshot={:?}",
             self.active,
-            self.viewport,
-            self.source
-                .as_ref()
-                .and_then(|s| s.snapshot(self.document, cx)),
-            self.snapshot
+            self.generation,
+            self.source.as_ref().and_then(|s| s.selected_text(cx)),
+            self.snapshot()
         )
     }
-    fn sync(
-        &mut self,
-        snapshot: Option<SelectionSnapshot>,
-        viewport: Bounds<Pixels>,
-        cx: &mut Context<Self>,
-    ) {
-        let mut snapshot = snapshot.filter(|s| self.active && viewport.contains(&s.glyph.center()));
-        let same = match (&self.snapshot, &snapshot) {
-            (Some(a), Some(b)) => a.same_selection(b),
-            (None, None) => true,
-            _ => false,
-        };
-        if !same {
-            self.generation += 1;
-            self.revision += 1;
-            self.state = if snapshot.is_some() {
-                TranslationState::Armed
-            } else {
-                TranslationState::Idle
-            };
+    fn capture_text(&mut self, anchor: SelectionAnchor, cx: &mut Context<Self>) {
+        if !self.active {
+            return;
         }
-        if let Some(snapshot) = &mut snapshot {
-            snapshot.revision = self.revision;
+        if let Some(text) = self
+            .source
+            .as_ref()
+            .and_then(|source| source.selected_text(cx))
+        {
+            self.capture = Capture::Offered(SelectionSnapshot {
+                text,
+                anchor,
+                generation: self.generation,
+            });
+            self.state = TranslationState::Armed;
+        } else if matches!(&self.source, Some(Source::Pdf(pdf)) if pdf.read(cx).is_selection_pending())
+        {
+            self.capture = Capture::AwaitingPdfText(anchor);
+        } else {
+            self.capture = Capture::Idle;
         }
-        if self.snapshot != snapshot || self.viewport != viewport {
-            self.snapshot = snapshot;
-            self.viewport = viewport;
-            cx.notify();
-        }
+        cx.notify();
     }
     pub fn begin(&mut self, cx: &mut Context<Self>) {
         if !self.active || matches!(self.state, TranslationState::Loading) {
             return;
         }
-        let Some(snapshot) = &self.snapshot else {
+        if self.snapshot().is_none() {
+            if !matches!(self.capture, Capture::Idle) {
+                return;
+            }
+            self.generation += 1;
+            self.capture_text(SelectionAnchor::Viewport, cx);
+        }
+        let Some(snapshot) = self.snapshot() else {
             return;
         };
+        let reply = self.service.translate(&snapshot.text);
         self.generation += 1;
         let generation = self.generation;
-        let revision = self.revision;
-        let reply = self.service.translate(&snapshot.text);
         self.state = TranslationState::Loading;
         cx.notify();
         cx.spawn(async move |this, cx| {
@@ -203,14 +216,7 @@ impl TranslationOverlay {
             let _ = this.update(cx, |this, cx| {
                 if this.active
                     && this.generation == generation
-                    && this.revision == revision
                     && matches!(this.state, TranslationState::Loading)
-                    && this
-                        .source
-                        .as_ref()
-                        .and_then(|source| source.snapshot(this.document, cx))
-                        .zip(this.snapshot.as_ref())
-                        .is_some_and(|(current, expected)| current.same_selection(expected))
                 {
                     this.state = match result {
                         Ok(text) => TranslationState::Ready(text),
@@ -223,8 +229,11 @@ impl TranslationOverlay {
         .detach();
     }
     fn dismiss(&mut self, cx: &mut Context<Self>) {
+        if !self.state.is_open() {
+            return;
+        }
         self.generation += 1;
-        self.state = if self.snapshot.is_some() {
+        self.state = if self.snapshot().is_some() {
             TranslationState::Armed
         } else {
             TranslationState::Idle
@@ -233,35 +242,99 @@ impl TranslationOverlay {
     }
 }
 
-fn preserve_selection(id: &'static str, element: impl IntoElement + 'static) -> impl IntoElement {
-    div().relative().child(element).child(
-        canvas(
-            |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal),
-            move |_, hitbox, window, cx| {
-                TextSelection::preserve_on_mouse_down(id, hitbox, window, cx)
-            },
-        )
-        .absolute()
-        .top_0()
-        .left_0()
-        .size_full(),
-    )
-}
-
 impl Render for TranslationOverlay {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let source = self.source.clone();
-        let document = self.document;
         let owner = cx.weak_entity();
+        let viewport = self.viewport.clone();
+        let hitbox = self.hitbox.clone();
         let sample = canvas(
-            |bounds, _, _| bounds,
-            move |_, viewport, _, cx| {
-                let snapshot = source
-                    .as_ref()
-                    .and_then(|source| source.snapshot(document, cx));
+            |_, _, _| {},
+            move |bounds, _, window, cx| {
+                let Some(hitbox) = hitbox.borrow().clone() else {
+                    return;
+                };
+                let current = Viewport {
+                    bounds,
+                    offset: source
+                        .as_ref()
+                        .map_or(Point::default(), |source| source.offset(cx)),
+                    rem: window.rem_size(),
+                    zoom: match &source {
+                        Some(Source::Pdf(pdf)) => pdf.read(cx).zoom(),
+                        _ => 1.,
+                    },
+                };
+                if let Some(old) = viewport.replace(Some(current))
+                    && old != current
+                {
+                    let scrolling = old.bounds == current.bounds
+                        && old.rem == current.rem
+                        && old.zoom == current.zoom;
+                    let owner = owner.clone();
+                    let generation = owner.update(cx, |this, _| this.generation).ok();
+                    window.defer(cx, move |_, cx| {
+                        let _ = owner.update(cx, |this, cx| {
+                            if generation == Some(this.generation)
+                                && (!scrolling || !matches!(this.capture, Capture::Pressed))
+                            {
+                                this.invalidate(cx);
+                            }
+                        });
+                    });
+                }
+                let down_owner = owner.clone();
+                let down_hitbox = hitbox.clone();
+                window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
+                    if phase.capture()
+                        && event.button == MouseButton::Left
+                        && down_hitbox.is_hovered(window)
+                    {
+                        let _ = down_owner.update(cx, |this, cx| {
+                            if this.active {
+                                this.invalidate(cx);
+                                this.capture = Capture::Pressed;
+                            }
+                        });
+                    }
+                });
+                let scroll_owner = owner.clone();
+                window.on_mouse_event(move |_: &ScrollEvent, phase, window, cx| {
+                    if phase.capture() && hitbox.should_handle_scroll(window) {
+                        let _ = scroll_owner.update(cx, |this, cx| {
+                            if this.active && !matches!(this.capture, Capture::Pressed) {
+                                this.invalidate(cx);
+                            }
+                        });
+                    }
+                });
                 let owner = owner.clone();
-                cx.defer(move |cx| {
-                    let _ = owner.update(cx, |this, cx| this.sync(snapshot, viewport, cx));
+                window.on_mouse_event(move |event: &MouseUpEvent, phase, window, cx| {
+                    if !phase.bubble() || event.button != MouseButton::Left {
+                        return;
+                    }
+                    let anchor = SelectionAnchor::Pointer(event.position);
+                    let generation = owner
+                        .update(cx, |this, _| {
+                            (this.active && matches!(this.capture, Capture::Pressed))
+                                .then_some(this.generation)
+                        })
+                        .ok()
+                        .flatten();
+                    if let Some(generation) = generation {
+                        let owner = owner.clone();
+                        window.defer(cx, move |window, cx| {
+                            window.defer(cx, move |_, cx| {
+                                let _ = owner.update(cx, |this, cx| {
+                                    if this.generation == generation
+                                        && matches!(this.capture, Capture::Pressed)
+                                    {
+                                        this.capture_text(anchor, cx);
+                                    }
+                                });
+                            });
+                        });
+                    }
                 });
             },
         )
@@ -273,21 +346,27 @@ impl Render for TranslationOverlay {
         if !self.active {
             return root;
         }
-        let Some(snapshot) = &self.snapshot else {
+        let Some(snapshot) = self.snapshot() else {
+            return root;
+        };
+        let Some(viewport) = self.viewport.get().map(|v| v.bounds) else {
             return root;
         };
         let size = window.rem_size() * 1.5;
         let gap = window.rem_size() * 0.25;
-        let glyph = snapshot.glyph;
-        let left = (glyph.right() - size)
-            .max(self.viewport.left() + gap)
-            .min((self.viewport.right() - size - gap).max(self.viewport.left()));
-        let top = if glyph.top() - size - gap >= self.viewport.top() {
-            glyph.top() - size - gap
-        } else {
-            glyph.bottom() + gap
+        let anchor = match snapshot.anchor {
+            SelectionAnchor::Pointer(point) => point,
+            SelectionAnchor::Viewport => viewport.top_right() - point(size + gap * 2., -gap),
         };
-        let top = top.min((self.viewport.bottom() - size - gap).max(self.viewport.top()));
+        let left = (anchor.x + gap)
+            .min(viewport.right() - size - gap)
+            .max(viewport.left() + gap);
+        let top = if anchor.y + gap + size <= viewport.bottom() {
+            anchor.y + gap
+        } else {
+            anchor.y - size - gap
+        }
+        .max(viewport.top() + gap);
         let state = self.state.clone();
         let content_owner = cx.entity();
         let popover = Popover::new("selection-translation")
@@ -373,17 +452,15 @@ impl Render for TranslationOverlay {
                     }
                     _ => content,
                 };
-                preserve_selection(
-                    "translation-popup-preserve",
-                    crate::controls::observed(content),
-                )
+                crate::controls::observed(content)
             });
         root = root.child(
             div()
                 .absolute()
-                .left(left - self.viewport.left())
-                .top(top - self.viewport.top())
-                .child(preserve_selection("translation-trigger-preserve", popover)),
+                .left(left - viewport.left())
+                .top(top - viewport.top())
+                .occlude()
+                .child(popover),
         );
         root
     }

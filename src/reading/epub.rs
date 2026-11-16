@@ -12,7 +12,6 @@ use reader_runtime::epub::EpubBook;
 use std::{cell::Cell, collections::HashMap, rc::Rc, sync::Arc};
 
 pub(super) enum EpubEvent {
-    SelectionChanging,
     Navigated,
 }
 
@@ -29,7 +28,6 @@ pub struct EpubPane {
     restore_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     last_anchor: String,
     navigation: u64,
-    subscriptions: Vec<Subscription>,
 }
 
 impl EpubPane {
@@ -82,7 +80,6 @@ impl EpubPane {
             restore_bounds: Rc::new(Cell::new(None)),
             last_anchor: String::new(),
             navigation: 0,
-            subscriptions: vec![],
         };
         pane.rebuild(cx);
         pane
@@ -94,54 +91,22 @@ impl EpubPane {
             .iter()
             .map(|b| cx.new(|cx| TextViewState::markdown(&b.markdown, cx).selectable(true)))
             .collect();
-        self.subscriptions = self
-            .texts
-            .iter()
-            .map(|text| {
-                cx.observe(text, |_, text, cx| {
-                    if text.read(cx).is_selecting() {
-                        cx.emit(EpubEvent::SelectionChanging);
-                    }
-                    cx.notify();
-                })
-            })
-            .collect();
         self.scroll = ScrollHandle::new();
         cx.notify();
     }
-    pub(super) fn selection_snapshot(
-        &self,
-        document: reader_core::BookId,
-        cx: &App,
-    ) -> Option<super::translation::SelectionSnapshot> {
+    pub(super) fn selected_text(&self, cx: &App) -> Option<String> {
         if self.texts.iter().any(|text| text.read(cx).is_selecting()) {
             return None;
         }
-        let mut selected = Vec::new();
-        let mut ranges = Vec::new();
-        let mut final_glyph = None;
-        for (block, text) in self.texts.iter().enumerate() {
-            let text = text.read(cx);
-            let value = text.selected_text();
-            if value.trim().is_empty() {
-                continue;
-            }
-            let snapshot = text.selection_snapshot()?;
-            ranges.push(super::translation::SelectionRange::Epub {
-                chapter: self.chapter,
-                block,
-                source: snapshot.source_range,
-            });
-            selected.push(snapshot.text);
-            final_glyph = Some(snapshot.final_glyph);
-        }
-        Some(super::translation::SelectionSnapshot {
-            document,
-            revision: 0,
-            text: selected.join("\n\n"),
-            ranges,
-            glyph: final_glyph?,
-        })
+        let text = self
+            .texts
+            .iter()
+            .map(|text| text.read(cx).selected_text())
+            .filter(|text| !text.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let text = text.trim().to_owned();
+        (!text.is_empty()).then_some(text)
     }
     pub(crate) fn reading_position(&self) -> (usize, usize) {
         let chapter = &self.document.chapters[self.chapter];

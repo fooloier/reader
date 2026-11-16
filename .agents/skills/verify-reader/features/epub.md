@@ -22,7 +22,7 @@ Preconditions: 从 Launch 的空隔离目录和生成夹具开始。
 
 ## 选中翻译
 
-同一 `ui` 命令运行生产事件测试。`production_epub_translation_glyph_preservation_keyboard_and_reflow` 与 `production_epub_translation_cross_block_stale_and_dismissal` 覆盖软换行、反向和跨块拖选、点击保留、复制、Tab/Enter、翻译 Action、旧请求结果、外部关闭、滚动和重排。
+同一 `ui` 命令运行生产事件测试。`production_epub_translation_release_snapshot_keyboard_and_reflow` 与 `production_epub_translation_cross_block_stale_and_dismissal` 覆盖软换行、正反向释放点、鼠标移动后按钮固定、跨块文本与 Ctrl+C 一致、点击清除原生高亮后仍翻译快照、复制、Tab/Enter、无快照的翻译 Action、旧请求结果、弹窗外首次拖选、下一次按下取消待提交捕获、拖选边缘自动滚动、滚动和重排。
 
 测试用本地 Rust HTTP 服务注入生产 TranslationService，不发送公共网络请求。公共接口检查另运行 `cargo test --locked -p reader-runtime translation::tests::public_api_smoke -- --ignored --nocapture`，报告实际接口结果。原生像素仍单独使用 `native`，不能从事件断言推断像素通过。
 

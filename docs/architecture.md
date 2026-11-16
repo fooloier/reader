@@ -10,7 +10,7 @@
 | 后台任务、标签、退出保存 | [Service](../crates/runtime/src/service.rs)、[应用](../src/app.rs) | [生产 UI 测试](../src/ui_tests.rs) |
 | 书架、菜单、工具栏 | [书架](../src/shelf.rs)、[工具栏](../src/toolbar.rs)、[弹层](../src/overlays.rs) | [生产 UI 测试](../src/ui_tests.rs) |
 | 阅读、目录、排版、图片 | [阅读会话](../src/reading/mod.rs)、[EPUB 解析](../crates/runtime/src/epub.rs)、[设置](../src/settings.rs) | [生产 UI 测试](../src/ui_tests.rs) |
-| 选区翻译、请求生命周期与缓存 | [翻译交互](../src/reading/translation.rs)、[翻译服务](../crates/runtime/src/translation.rs)、[TextView 补丁来源](../vendor/gpui-base/PATCHES.md) | 翻译服务同文件中的 Rust 测试、[生产 UI 测试](../src/ui_tests.rs) |
+| 选区翻译、请求生命周期与缓存 | [翻译交互](../src/reading/translation.rs)、[翻译服务](../crates/runtime/src/translation.rs) | 翻译服务同文件中的 Rust 测试、[生产 UI 测试](../src/ui_tests.rs) |
 | PDF 宿主接入或升级 | [阅读会话](../src/reading/mod.rs)、[本地补丁来源](../vendor/gpui-pdf/PATCHES.md) | [生产 UI 测试](../src/ui_tests.rs) |
 | 构建依赖与特性 | [工作区清单](../Cargo.toml)、[锁文件](../Cargo.lock) | [测试入口](../tests/run.py) |
 

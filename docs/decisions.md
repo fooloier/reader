@@ -22,9 +22,11 @@
 
 翻译采用用户主动触发的远程服务，避免选中即上传正文。用户批准使用 Index-Translate 公共接口，并将默认目标限定为简体中文。翻译 HTTP 与缓存使用独立线程，避免长请求阻塞书库任务。缓存独立于书库数据库，允许跨书籍复用和单独清除。
 
-EPUB 的末字形定位需要排版后的 glyph box，现有公开 caret 接口在软换行和尾部空白处不满足要求。选择对 gpui-base 做本地最小补丁，保持通用字形几何与选区交互留在 Base，产品翻译界面留在阅读模块。按钮在 bubble 阶段抑制选区不足以阻止 capture 阶段清空，因此保留选区是明确登记的控件契约，离开控件后新选择仍正常清空。
+原先为末字形定位和点击保留高亮引入的 gpui-base 本地补丁已被释放点快照方案替代。用户选择按钮固定在鼠标释放位置附近，并接受点击时原生高亮可能清除。翻译操作因此由阅读会话保存的原文驱动，无需在控件点击或请求完成时重新验证原生选区，也不再维护字形几何或修改框架选区行为。gpui-base 恢复使用 crates.io 0.9.1，PDF 的兼容、宿主工具栏和位置恢复补丁继续保留。
 
-补丁来源与升级检查见 [gpui-base/PATCHES.md](../vendor/gpui-base/PATCHES.md)。接口格式依据 [官方 call_api.py](https://github.com/bilibili/Index-Translate/blob/main/inference/llm/call_api.py)，服务可用性由远端决定。
+释放后读取已经提交的选中文本，确保 EPUB 跨块选区与原生复制一致。新的阅读手势即使选中相同原文也会取消旧操作；滚动、导航、关闭和重排同样使待完成的捕获与请求失效。按钮、译文弹层内操作继续作用于原文快照。这项取舍优先保证操作对象稳定，避免绑定高亮生命周期。
+
+接口格式依据 [官方 call_api.py](https://github.com/bilibili/Index-Translate/blob/main/inference/llm/call_api.py)，服务可用性由远端决定。
 
 ## 记录新决策
 

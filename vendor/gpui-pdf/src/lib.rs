@@ -1797,25 +1797,21 @@ impl PdfView {
         matches!(self.page_text.get(&page), Some(TextSlot::Ready(_)))
     }
     #[cfg(feature = "markup")]
-    pub fn selection_snapshot(
-        &self,
-    ) -> Option<(
-        usize,
-        std::ops::Range<usize>,
-        String,
-        gpui::Bounds<gpui::Pixels>,
-    )> {
+    pub fn selection_snapshot(&self) -> Option<(usize, String)> {
         let (page, a, b) = self.text_sel?;
         let TextSlot::Ready(text) = self.page_text.get(&page)? else {
             return None;
         };
-        let (range, glyph) = text.selected_glyph(a, b)?;
-        let bounds = self.page_bounds(page)?;
-        let glyph = gpui::Bounds::new(
-            bounds.origin + gpui::point(bounds.size.width * glyph.x, bounds.size.height * glyph.y),
-            gpui::size(bounds.size.width * glyph.w, bounds.size.height * glyph.h),
-        );
-        Some((page, range, text.selected_text(a, b)?, glyph))
+        Some((page, text.selected_text(a, b)?))
+    }
+    #[cfg(feature = "markup")]
+    pub fn is_selection_pending(&self) -> bool {
+        self.text_sel.is_some_and(|(page, _, _)| {
+            matches!(self.page_text.get(&page), Some(TextSlot::Loading))
+        })
+    }
+    pub fn scroll_offset(&self) -> gpui::Point<gpui::Pixels> {
+        self.scroll.offset()
     }
     pub fn page_bounds(&self, page: usize) -> Option<gpui::Bounds<gpui::Pixels>> {
         let mut bounds = self.scroll.bounds_for_item(page)?;
@@ -2680,6 +2676,7 @@ impl Render for PdfView {
                 .child(
                     div()
                         .id("pdf-scrollbar-thumb")
+                        .occlude()
                         .absolute()
                         .top(px(m.thumb_top))
                         .right(px(2.0))

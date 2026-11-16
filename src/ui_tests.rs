@@ -128,6 +128,7 @@ impl Harness {
             std::thread::yield_now();
         }
     }
+    #[track_caller]
     fn wait_window(&mut self, predicate: impl Fn(&Window) -> bool) {
         let until = Instant::now() + Duration::from_secs(15);
         loop {
@@ -1411,7 +1412,7 @@ impl Harness {
                 .read(cx)
                 .translation
                 .read(cx)
-                .snapshot
+                .snapshot()
                 .is_some()
         });
         self.cx.read(|cx| {
@@ -1419,8 +1420,8 @@ impl Harness {
                 .read(cx)
                 .translation
                 .read(cx)
-                .snapshot
-                .clone()
+                .snapshot()
+                .cloned()
                 .unwrap()
         })
     }
@@ -1440,7 +1441,9 @@ impl Harness {
 }
 
 #[test]
-fn production_epub_translation_glyph_preservation_keyboard_and_reflow() {
+fn production_epub_translation_release_snapshot_keyboard_and_reflow() {
+    use crate::reading::translation::SelectionAnchor;
+    use gpui_kit::test::TestEventExt;
     let server = TranslationServer::new();
     let mut h = Harness::new("epub-translation");
     h.translations(&server);
@@ -1457,27 +1460,26 @@ fn production_epub_translation_glyph_preservation_keyboard_and_reflow() {
         window.drag(points.0, points.1, cx);
     });
     let forward = h.selection(id);
-    h.frame(|window, _| {
-        let block = window.find("epub-block-1").bounds();
-        assert!(
-            forward.glyph.top() > block.top() + px(20.),
-            "软换行末字形必须在第二行"
-        );
+    assert_eq!(forward.anchor, SelectionAnchor::Pointer(points.1));
+    h.frame(|window, cx| {
         let icon = window.find("translate-selection").bounds();
-        assert!(icon.bottom() <= forward.glyph.top());
-        assert!((icon.right() - forward.glyph.right()).abs() <= px(1.));
+        assert!(icon.top() > points.1.y && icon.left() > points.1.x);
+        window.pointer_move(points.1 + point(px(250.), px(70.)), None, cx);
+        assert_eq!(window.find("translate-selection").bounds(), icon);
     });
     assert!(server.requests.try_recv().is_err(), "选择本身不得发送请求");
     h.frame(|window, cx| window.drag(points.1, points.0, cx));
     let reverse = h.selection(id);
-    assert_eq!(
-        (&forward.text, &forward.ranges, forward.glyph),
-        (&reverse.text, &reverse.ranges, reverse.glyph),
-        "反向选区使用相同阅读顺序末字形"
-    );
-    assert_eq!(reverse.document, id);
-    assert!(reverse.revision > forward.revision);
-    h.click("translate-selection");
+    assert_eq!(forward.text, reverse.text);
+    assert_eq!(reverse.anchor, SelectionAnchor::Pointer(points.0));
+    assert!(reverse.generation > forward.generation);
+    h.frame(|window, cx| {
+        let button = window.find("translate-selection").bounds().center();
+        window.pointer_down(button, gpui_kit::MouseButton::Left, cx);
+        assert!(window.try_find("translate-selection").is_some());
+        assert!(gpui_kit::base::TextSelection::selected_text(window, cx).is_empty());
+        window.pointer_up(button, gpui_kit::MouseButton::Left, cx);
+    });
     let (request, reply) = server.next();
     assert!(
         request["messages"][0]["content"]
@@ -1485,15 +1487,9 @@ fn production_epub_translation_glyph_preservation_keyboard_and_reflow() {
             .unwrap()
             .ends_with(reverse.text.trim())
     );
-    h.frame(|window, cx| {
-        assert_eq!(
-            gpui_kit::base::TextSelection::selected_text(window, cx),
-            reverse.text,
-            "按钮 capture 阶段不得清除高亮或选中文本"
-        );
-    });
     reply.send("软换行译文".into()).unwrap();
     h.translation_ready(id, "软换行译文");
+    assert_eq!(h.selection(id).text, reverse.text);
     h.click("copy-translation");
     h.cx.read(|cx| {
         assert_eq!(
@@ -1503,15 +1499,9 @@ fn production_epub_translation_glyph_preservation_keyboard_and_reflow() {
     });
     h.press("escape");
     h.translation_closed(id);
-    h.frame(|window, cx| {
-        assert_eq!(
-            gpui_kit::base::TextSelection::selected_text(window, cx),
-            reverse.text
-        );
-        window.press("ctrl-shift-t", cx);
-    });
+    h.press("ctrl-shift-t");
     h.translation_ready(id, "软换行译文");
-    assert!(server.requests.try_recv().is_err(), "同一选区命中缓存");
+    assert!(server.requests.try_recv().is_err(), "冻结选区命中缓存");
     h.press("escape");
     for _ in 0..25 {
         let focused =
@@ -1531,19 +1521,75 @@ fn production_epub_translation_glyph_preservation_keyboard_and_reflow() {
     h.translation_ready(id, "软换行译文");
     h.press("escape");
     h.cx.simulate_window_resize(h.window, size(px(850.), px(800.)));
-    h.frame(|_, _| {});
-    let resized = h.selection(id);
-    assert_eq!(resized.text, reverse.text);
-    assert_eq!(resized.ranges, reverse.ranges);
-    assert!(server.requests.try_recv().is_err(), "重新排版不得发请求");
+    h.wait_window(|window| window.try_find("translate-selection").is_none());
+    h.frame(|window, cx| {
+        let block = window.find("epub-block-1").bounds();
+        window.drag(
+            block.origin + point(px(25.), px(12.)),
+            block.origin + point(px(240.), px(52.)),
+            cx,
+        );
+    });
+    let live = h.selection(id);
+    assert_ne!(live.text, reverse.text);
     h.frame(|window, cx| {
         window.scroll(
             "epub-scroll",
-            gpui_kit::ScrollDelta::Pixels(point(px(0.), px(-550.))),
+            gpui_kit::ScrollDelta::Pixels(point(px(0.), px(-5.))),
             cx,
         )
     });
     h.wait_window(|window| window.try_find("translate-selection").is_none());
+    h.press("ctrl-shift-t");
+    let keyboard = h.selection(id);
+    assert_eq!(keyboard.anchor, SelectionAnchor::Viewport);
+    assert_eq!(keyboard.text, live.text);
+    let (_, reply) = server.next();
+    reply.send("键盘译文".into()).unwrap();
+    h.translation_ready(id, "键盘译文");
+    h.press("escape");
+    h.click("settings");
+    h.wait_window(|window| window.try_find("font-size-plus").is_some());
+    h.click("font-size-plus");
+    h.press("escape");
+    h.wait_window(|window| window.try_find("translate-selection").is_none());
+    h.frame(|window, cx| {
+        let block = window.find("epub-block-1").bounds();
+        let start = block.origin + point(px(25.), px(12.));
+        window.drag(start, start + point(px(200.), px(0.)), cx);
+        window.pointer_down(start, gpui_kit::MouseButton::Left, cx);
+    });
+    h.frame(|window, _| {
+        assert!(
+            window.try_find("translate-selection").is_none(),
+            "后续按下必须取消尚未提交的 defer 捕获"
+        )
+    });
+    let mut edge = point(px(0.), px(0.));
+    let offset =
+        h.cx.read(|cx| match &h.app.read(cx).sessions[&id].read(cx).state {
+            ReaderState::Epub(pane) => pane.read(cx).scroll.offset(),
+            _ => unreachable!(),
+        });
+    h.frame(|window, cx| {
+        let viewport = window.find("epub-scroll").bounds();
+        edge = point(viewport.center().x, viewport.bottom() - px(2.));
+        window.pointer_move(edge, Some(gpui_kit::MouseButton::Left), cx);
+    });
+    for _ in 0..12 {
+        h.cx.background_executor
+            .advance_clock(Duration::from_millis(16));
+        h.frame(|window, _| assert!(window.try_find("translate-selection").is_none()));
+    }
+    h.cx.read(|cx| match &h.app.read(cx).sessions[&id].read(cx).state {
+        ReaderState::Epub(pane) => assert!(
+            pane.read(cx).scroll.offset().y < offset.y,
+            "选择边缘自动滚动必须实际移动正文"
+        ),
+        _ => unreachable!(),
+    });
+    h.frame(|window, cx| window.pointer_up(edge, gpui_kit::MouseButton::Left, cx));
+    assert_eq!(h.selection(id).anchor, SelectionAnchor::Pointer(edge));
 }
 
 #[test]
@@ -1565,19 +1611,22 @@ fn production_epub_translation_cross_block_stale_and_dismissal() {
         window.drag(points.0, points.1, cx);
     });
     let a = h.selection(id);
-    assert_eq!(a.ranges.len(), 2);
-    h.frame(|window, _| assert!(a.glyph.top() >= window.find("epub-block-2").bounds().top()));
+    h.press("ctrl-c");
+    h.cx.read(|cx| {
+        assert_eq!(
+            cx.read_from_clipboard().and_then(|c| c.text()).as_deref(),
+            Some(a.text.as_str())
+        )
+    });
+    assert!(a.text.contains('\n'));
     h.frame(|window, cx| window.drag(points.1, points.0, cx));
     let reverse = h.selection(id);
-    assert_eq!(
-        (&reverse.text, &reverse.ranges, reverse.glyph),
-        (&a.text, &a.ranges, a.glyph)
-    );
+    assert_eq!(reverse.text, a.text);
+    assert!(reverse.generation > a.generation);
     h.click("translate-selection");
     let (_, reply_a) = server.next();
-    h.press("escape");
-    h.translation_closed(id);
     h.frame(|window, cx| window.drag(points.1, points.1 + point(px(170.), px(0.)), cx));
+    h.translation_closed(id);
     let b = h.selection(id);
     assert_ne!(a.text, b.text);
     h.click("translate-selection");
@@ -1611,7 +1660,7 @@ fn production_epub_translation_cross_block_stale_and_dismissal() {
 }
 
 #[test]
-fn production_pdf_translation_final_glyph_reverse_and_close() {
+fn production_pdf_translation_release_reverse_and_close() {
     let server = TranslationServer::new();
     let mut h = Harness::new("pdf-translation");
     h.translations(&server);
@@ -1636,36 +1685,83 @@ fn production_pdf_translation_final_glyph_reverse_and_close() {
     h.frame(|window, cx| window.drag(start, end, cx));
     let a = h.selection(id);
     assert!(a.text.contains("Reader page 1"));
-    assert!(
-        a.glyph.right() < end.x,
-        "图标必须锚定实际最后字形，而非鼠标终点"
+    assert_eq!(
+        a.anchor,
+        crate::reading::translation::SelectionAnchor::Pointer(end)
     );
     h.frame(|window, _| {
         let icon = window.find("translate-selection").bounds();
-        assert!(icon.bottom() <= a.glyph.top());
-        assert!((icon.right() - a.glyph.right()).abs() <= px(1.));
+        assert!(icon.top() > end.y && icon.left() > end.x);
     });
     h.frame(|window, cx| window.drag(end, start, cx));
     let reverse = h.selection(id);
-    assert_eq!(
-        (&reverse.text, &reverse.ranges, reverse.glyph),
-        (&a.text, &a.ranges, a.glyph)
-    );
+    assert_eq!(reverse.text, a.text);
+    assert!(reverse.generation > a.generation);
     h.click("translate-selection");
     let (_, reply) = server.next();
     assert_eq!(
         h.cx.read(|cx| match &h.app.read(cx).sessions[&id].read(cx).state {
-            ReaderState::Pdf(pdf) => pdf.read(cx).selection_snapshot().unwrap().2,
+            ReaderState::Pdf(pdf) => pdf.read(cx).selection_snapshot().unwrap().1,
             _ => unreachable!(),
         }),
         a.text
     );
+    h.frame(|window, cx| window.drag(end, start, cx));
+    let repeated = h.selection(id);
+    assert_eq!(repeated.text, reverse.text);
+    assert!(repeated.generation > reverse.generation);
     reply.send("PDF 译文".into()).unwrap();
+    for _ in 0..10 {
+        h.frame(|_, _| {});
+    }
+    h.translation_closed(id);
+    h.click("translate-selection");
     h.translation_ready(id, "PDF 译文");
     h.press("escape");
     h.translation_closed(id);
     h.click("translate-selection");
     h.translation_ready(id, "PDF 译文");
+    h.press("escape");
+    let mut corner = point(px(0.), px(0.));
+    h.frame(|window, cx| {
+        corner =
+            window.find("pdf-reading-viewport").bounds().bottom_right() - point(px(20.), px(2.));
+        window.drag(start, corner, cx);
+    });
+    let clamped = h.selection(id);
+    assert_eq!(
+        clamped.anchor,
+        crate::reading::translation::SelectionAnchor::Pointer(corner)
+    );
+    h.frame(|window, _| {
+        let viewport = window.find("pdf-reading-viewport").bounds();
+        let icon = window.find("translate-selection").bounds();
+        assert!(icon.bottom() < corner.y, "底边应翻到释放点上方");
+        assert!(icon.left() >= viewport.left() && icon.right() <= viewport.right());
+    });
+    let before =
+        h.cx.read(|cx| match &h.app.read(cx).sessions[&id].read(cx).state {
+            ReaderState::Pdf(pdf) => pdf.read(cx).scroll_offset(),
+            _ => unreachable!(),
+        });
+    h.frame(|window, cx| {
+        let viewport = window.find("pdf-reading-viewport").bounds();
+        let thumb = point(viewport.right() - px(6.), viewport.top() + px(30.));
+        window.drag(thumb, thumb + point(px(0.), px(35.)), cx);
+    });
+    h.cx.read(|cx| match &h.app.read(cx).sessions[&id].read(cx).state {
+        ReaderState::Pdf(pdf) => assert_ne!(
+            pdf.read(cx).scroll_offset(),
+            before,
+            "真实滚动条拖动应改变偏移"
+        ),
+        _ => unreachable!(),
+    });
+    h.wait_window(|window| window.try_find("translate-selection").is_none());
+    h.frame(|window, cx| window.drag(start, end, cx));
+    h.selection(id);
+    h.press("pagedown");
+    h.wait_window(|window| window.try_find("translate-selection").is_none());
     h.click("next");
     h.wait_window(|window| window.try_find("translate-selection").is_none());
     h.click(&format!("close-{}", id.0));
@@ -1730,15 +1826,16 @@ fn production_translation_retry_long_result_and_inflight_tab_close() {
             cx,
         )
     });
-    let moved = h.selection(id);
-    h.frame(|window, _| {
-        let icon = window.find("translate-selection").bounds();
-        assert!(
-            icon.top() >= moved.glyph.bottom(),
-            "阅读区顶边不足时按钮应翻到字形下方"
-        );
+    h.wait_window(|window| window.try_find("translate-selection").is_none());
+    assert!(server.requests.try_recv().is_err(), "滚动不得发起翻译");
+    h.frame(|window, cx| {
+        window.drag(
+            start - point(px(0.), px(80.)),
+            end - point(px(220.), px(80.)),
+            cx,
+        )
     });
-    assert!(server.requests.try_recv().is_err(), "几何改变不应发起翻译");
+    let moved = h.selection(id);
     h.frame(|window, cx| {
         use gpui_kit::test::TestEventExt;
         let blank =
@@ -1750,11 +1847,33 @@ fn production_translation_retry_long_result_and_inflight_tab_close() {
     h.frame(|window, cx| {
         window.drag(
             start - point(px(0.), px(80.)),
-            moved.glyph.center() - point(px(60.), px(0.)),
+            end - point(px(100.), px(80.)),
             cx,
         )
     });
-    assert_ne!(h.selection(id).text, moved.text);
+    assert_eq!(h.selection(id).text, moved.text);
+    h.click("next");
+    let bounds =
+        h.cx.read(|cx| match &h.app.read(cx).sessions[&id].read(cx).state {
+            ReaderState::Pdf(pdf) => pdf.read(cx).page_bounds(1).unwrap(),
+            _ => unreachable!(),
+        });
+    h.frame(|window, cx| {
+        window.drag(
+            bounds.origin
+                + point(
+                    bounds.size.width * (42. / 600.),
+                    bounds.size.height * (60. / 800.),
+                ),
+            bounds.origin
+                + point(
+                    bounds.size.width * (480. / 600.),
+                    bounds.size.height * (60. / 800.),
+                ),
+            cx,
+        )
+    });
+    h.selection(id);
     h.click("translate-selection");
     let (_, reply) = server.next();
     h.click_label("书架");
@@ -1774,4 +1893,94 @@ fn production_translation_retry_long_result_and_inflight_tab_close() {
             .is_some_and(|status| status.label() == Some("翻译缓存已清除"))
     });
     h.press("escape");
+}
+
+#[test]
+fn production_pdf_pending_translation_capture_and_cancellation() {
+    use gpui_kit::test::TestEventExt;
+    for cancellation in ["none", "press", "scroll", "close"] {
+        let mut h = Harness::new(&format!("pending-{cancellation}"));
+        let id = h.import("sample.pdf");
+        h.cx.update_window(h.window, |_, window, cx| {
+            window.click(format!("open-{}", id.0), cx)
+        })
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let bounds = loop {
+            h.cx.update_window(h.window, |_, window, cx| window.render_frame(cx))
+                .unwrap();
+            let bounds =
+                h.cx.read(|cx| match &h.app.read(cx).sessions[&id].read(cx).state {
+                    ReaderState::Pdf(pdf) => pdf.read(cx).page_bounds(0),
+                    _ => None,
+                });
+            if let Some(bounds) = bounds {
+                break bounds;
+            }
+            assert!(Instant::now() < deadline, "PDF 布局未就绪");
+            h.cx.dispatcher.tick(false);
+        };
+        let start = bounds.origin
+            + point(
+                bounds.size.width * (42. / 600.),
+                bounds.size.height * (60. / 800.),
+            );
+        let end = bounds.origin
+            + point(
+                bounds.size.width * (480. / 600.),
+                bounds.size.height * (60. / 800.),
+            );
+        h.cx.update_window(h.window, |_, window, cx| window.drag(start, end, cx))
+            .unwrap();
+        h.cx.read(|cx| {
+            let session = h.app.read(cx).sessions[&id].read(cx);
+            let ReaderState::Pdf(pdf) = &session.state else {
+                unreachable!()
+            };
+            assert!(
+                pdf.read(cx).is_selection_pending(),
+                "释放时必须仍在提取真实 PDF 文本"
+            );
+            assert!(session.translation.read(cx).snapshot().is_none());
+        });
+        match cancellation {
+            "press" => {
+                h.cx.update_window(h.window, |_, window, cx| {
+                    window.pointer_down(start, gpui_kit::MouseButton::Left, cx)
+                })
+                .unwrap();
+            }
+            "scroll" => {
+                h.cx.update_window(h.window, |_, window, cx| {
+                    window.scroll(
+                        "pdf-reading-viewport",
+                        gpui_kit::ScrollDelta::Pixels(point(px(0.), px(-5.))),
+                        cx,
+                    )
+                })
+                .unwrap();
+            }
+            "close" => {
+                h.click(&format!("close-{}", id.0));
+            }
+            _ => {}
+        }
+        if cancellation == "none" {
+            let snapshot = h.selection(id);
+            assert!(snapshot.text.contains("Reader page 1"));
+            assert_eq!(
+                snapshot.anchor,
+                crate::reading::translation::SelectionAnchor::Pointer(end)
+            );
+        } else {
+            for _ in 0..10 {
+                h.frame(|_, _| {});
+            }
+            h.frame(|window, _| assert!(window.try_find("translate-selection").is_none()));
+            if cancellation == "press" {
+                h.frame(|window, cx| window.pointer_up(start, gpui_kit::MouseButton::Left, cx));
+                h.frame(|window, _| assert!(window.try_find("translate-selection").is_none()));
+            }
+        }
+    }
 }

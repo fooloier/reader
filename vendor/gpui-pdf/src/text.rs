@@ -421,21 +421,6 @@ impl PageText {
         (!text.trim().is_empty()).then_some(text)
     }
 
-    pub fn selected_glyph(
-        &self,
-        from: NormPoint,
-        to: NormPoint,
-    ) -> Option<(std::ops::Range<usize>, NormRect)> {
-        let a = self.nearest_run(from)?;
-        let b = self.nearest_run(to)?;
-        let range = a.min(b)..a.max(b) + 1;
-        let glyph = self.runs[range.clone()]
-            .iter()
-            .rev()
-            .find(|run| !run.text.trim().is_empty())?;
-        Some((range, glyph.rect))
-    }
-
     /// Resolve a drag from `from` to `to` into a [`Selection`]: the run range between
     /// the nearest glyphs (draw order ≈ reading order), its one-line quote, the
     /// occurrence index, and the rects to draw. `None` if there's no text or the
@@ -492,31 +477,6 @@ mod tests {
     }
 
     #[test]
-    fn selected_glyph_uses_logical_end_in_both_directions() {
-        let pt = PageText::new(vec![
-            run("Hello", 0.1, 0.1, 0.1, 0.02),
-            run(" ", 0.21, 0.1, 0.02, 0.02),
-            run("world", 0.1, 0.2, 0.1, 0.02),
-            run(" ", 0.21, 0.2, 0.02, 0.02),
-        ]);
-        let from = NormPoint { x: 0.11, y: 0.11 };
-        let to = NormPoint { x: 0.22, y: 0.21 };
-        let forward = pt.selected_glyph(from, to).unwrap();
-        assert_eq!(forward, pt.selected_glyph(to, from).unwrap());
-        assert_eq!(forward.0, 0..4);
-        assert_eq!(
-            forward.1,
-            NormRect {
-                x: 0.1,
-                y: 0.2,
-                w: 0.1,
-                h: 0.02
-            }
-        );
-        assert_eq!(pt.selected_text(from, to).unwrap(), "Hello\nworld");
-    }
-
-    #[test]
     fn selected_text_keeps_line_breaks() {
         let pt = sample();
         let from = NormPoint { x: 0.11, y: 0.11 };
@@ -525,6 +485,20 @@ mod tests {
             pt.selected_text(from, to).as_deref(),
             Some("Hello World\nsecond")
         );
+    }
+
+    #[test]
+    fn selected_text_keeps_line_breaks_around_blank_runs_in_both_directions() {
+        let pt = PageText::new(vec![
+            run("Hello", 0.1, 0.1, 0.1, 0.02),
+            run(" ", 0.21, 0.1, 0.02, 0.02),
+            run("world", 0.1, 0.2, 0.1, 0.02),
+            run(" ", 0.21, 0.2, 0.02, 0.02),
+        ]);
+        let from = NormPoint { x: 0.11, y: 0.11 };
+        let to = NormPoint { x: 0.22, y: 0.21 };
+        assert_eq!(pt.selected_text(from, to).as_deref(), Some("Hello\nworld"));
+        assert_eq!(pt.selected_text(to, from).as_deref(), Some("Hello\nworld"));
     }
 
     #[test]

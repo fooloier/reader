@@ -22,9 +22,9 @@ Preconditions: 从 Launch 的空隔离目录和生成夹具开始。
 
 ## 选中翻译
 
-同一 `ui` 命令运行生产事件测试。`production_pdf_translation_final_glyph_reverse_and_close` 覆盖真实字形位置、反向拖选、点击后保持选区、翻译结果、Escape、翻页隐藏和关闭会话。
+同一 `ui` 命令运行生产事件测试。`production_pdf_translation_release_reverse_and_close` 覆盖释放点、反向与同文重选、旧结果不重开、点击后翻译快照、底边翻转与视口钳制、真实滚动条拖动、分页键、Escape、翻页隐藏和关闭会话。`production_pdf_pending_translation_capture_and_cancellation` 逐步推进真实 PDF 后台提取，用真实拖选验证延迟文字捕获，以及新按下、滚动、关闭后的取消。
 
-测试用本地 Rust HTTP 服务注入生产 TranslationService，不发送公共网络请求。公共接口检查另运行 `cargo test --locked -p reader-runtime translation::tests::public_api_smoke -- --ignored --nocapture`，报告实际接口结果。`production_translation_retry_long_result_and_inflight_tab_close` 另验证限流后的重试、长译文滚动与复制、顶边回退、空选区清除和清除缓存反馈。原生像素仍单独使用 `native`，不能从事件断言推断像素通过。
+测试用本地 Rust HTTP 服务注入生产 TranslationService，不发送公共网络请求。公共接口检查另运行 `cargo test --locked -p reader-runtime translation::tests::public_api_smoke -- --ignored --nocapture`，报告实际接口结果。`production_translation_retry_long_result_and_inflight_tab_close` 另验证限流后的重试、长译文滚动与复制、滚动清除、空选区清除和清除缓存反馈。原生像素仍单独使用 `native`，不能从事件断言推断像素通过。
 
 ## Gotchas
 
