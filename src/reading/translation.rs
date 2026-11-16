@@ -2,9 +2,10 @@ use super::{EpubPane, ReaderState};
 use gpui_kit::{
     component::{
         ActiveTheme, IconName, Sizable,
-        button::{Button, ButtonVariant, ButtonVariants},
+        button::{Button, ButtonCustomVariant, ButtonVariant, ButtonVariants},
         popover::Popover,
         spinner::Spinner,
+        theme::ThemeColor,
     },
     prelude::*,
     *,
@@ -381,7 +382,22 @@ impl Render for TranslationOverlay {
                         "翻译为简体中文（Ctrl+Shift+T）"
                     },
                 )
-                .with_variant(ButtonVariant::Default),
+                .with_variant(ButtonVariant::Default)
+                .when(matches!(self.source, Some(Source::Pdf(_))), |button| {
+                    let colors = ThemeColor::light();
+                    button
+                        .custom(
+                            ButtonCustomVariant::new(cx)
+                                .color(colors.button)
+                                .foreground(colors.button_foreground)
+                                .hover(colors.button_hover)
+                                .active(colors.button_active),
+                        )
+                        .border_1()
+                        .bg(colors.button)
+                        .text_color(colors.button_foreground)
+                        .border_color(colors.input)
+                }),
             )
             .on_open_change(cx.listener(|this, open, _, cx| {
                 if *open {
