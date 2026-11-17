@@ -438,9 +438,13 @@ mod tests {
                 let mut count = 0;
                 let mut children = vec![];
                 while !stopped.load(Ordering::SeqCst) {
-                    let Ok((mut stream, _)) = listener.accept() else {
-                        thread::sleep(Duration::from_millis(2));
-                        continue;
+                    let (mut stream, _) = match listener.accept() {
+                        Ok(connection) => connection,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            thread::sleep(Duration::from_millis(2));
+                            continue;
+                        }
+                        Err(error) => panic!("测试 HTTP 服务器接收连接失败：{error}"),
                     };
                     count += 1;
                     let ix = count;
@@ -468,7 +472,10 @@ mod tests {
                         }
                         sent.send(serde_json::from_slice(&data[header_end..header_end+length]).unwrap()).unwrap();
                         let (status, body) = handler(ix);
-                        let _ = write!(stream, "HTTP/1.1 {status} Result\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                        let result = write!(stream, "HTTP/1.1 {status} Result\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                        if let Err(error) = result {
+                            assert!(matches!(error.kind(), std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset), "测试 HTTP 回复写入失败：{error}");
+                        }
                     }));
                 }
                 for child in children {

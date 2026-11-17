@@ -673,7 +673,7 @@ fn production_epub_selection_copy_and_anchor_restore() {
         let clipboard = cx
             .read_from_clipboard()
             .and_then(|c| c.text())
-            .unwrap_or_default();
+            .expect("复制后剪贴板应包含文本");
         assert!(!clipboard.trim().is_empty(), "实际拖选后剪贴板应有文字");
     });
     h.frame(|window, cx| {
@@ -747,7 +747,7 @@ fn production_pdf_navigation_zoom() {
         let copied = cx
             .read_from_clipboard()
             .and_then(|c| c.text())
-            .unwrap_or_default();
+            .expect("复制后剪贴板应包含文本");
         assert!(
             copied.contains("Reader page 1"),
             "PDF 文字拖选复制失败：{copied:?}"
@@ -1463,9 +1463,13 @@ impl TranslationServer {
         let thread = std::thread::spawn(move || {
             let mut children = vec![];
             while !stopped.load(Ordering::SeqCst) {
-                let Ok((mut stream, _)) = listener.accept() else {
-                    std::thread::sleep(Duration::from_millis(2));
-                    continue;
+                let (mut stream, _) = match listener.accept() {
+                    Ok(connection) => connection,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(2));
+                        continue;
+                    }
+                    Err(error) => panic!("测试 HTTP 服务器接收连接失败：{error}"),
                 };
                 let send = send.clone();
                 children.push(std::thread::spawn(move || {
@@ -1474,7 +1478,7 @@ impl TranslationServer {
                     let mut buffer = [0; 4096];
                     let (end, length) = loop {
                         let n = stream.read(&mut buffer).unwrap();
-                        if n == 0 { return; }
+                        assert!(n > 0, "HTTP 请求未完整发送便断开连接");
                         data.extend_from_slice(&buffer[..n]);
                         if let Some(end) = data.windows(4).position(|s| s == b"\r\n\r\n") {
                             let headers = String::from_utf8_lossy(&data[..end]).to_lowercase();
@@ -1484,18 +1488,18 @@ impl TranslationServer {
                     };
                     while data.len() < end + length {
                         let n = stream.read(&mut buffer).unwrap();
-                        if n == 0 { return; }
+                        assert!(n > 0, "HTTP 请求未完整发送便断开连接");
                         data.extend_from_slice(&buffer[..n]);
                     }
                     let (reply, receive) = std::sync::mpsc::channel();
-                    if send.send((serde_json::from_slice(&data[end..end+length]).unwrap(), reply)).is_err() { return; }
-                    if let Ok(content) = receive.recv_timeout(Duration::from_secs(5)) {
-                        let (status, body) = match content {
-                            TranslationReply::Text(content) => (200, serde_json::json!({"choices":[{"message":{"content":content},"finish_reason":"stop"}]}).to_string()),
-                            TranslationReply::Status(status) => (status, "{}".into()),
-                        };
-                        let _ = write!(stream, "HTTP/1.1 {status} Result\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
-                    }
+                    send.send((serde_json::from_slice(&data[end..end+length]).unwrap(), reply)).unwrap();
+                    let content = receive.recv_timeout(Duration::from_secs(5)).expect("测试必须及时提供 HTTP 回复");
+                    let (status, body) = match content {
+                        TranslationReply::Text(content) => (200, serde_json::json!({"choices":[{"message":{"content":content},"finish_reason":"stop"}]}).to_string()),
+                        TranslationReply::Status(status) => (status, "{}".into()),
+                    };
+                    let result = write!(stream, "HTTP/1.1 {status} Result\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                    result.expect("测试 HTTP 回复写入失败");
                 }));
             }
             for child in children {
