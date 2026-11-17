@@ -9,7 +9,7 @@
 
 ## How to get to it (user POV)
 
-书架打开 PDF；阅读工具栏翻页、适宽、整页、目录；设置缩放。
+书架打开 PDF；阅读工具栏翻页、适宽、整页、书签；设置缩放。
 
 ## Driving it with TestWindowExt
 
@@ -18,6 +18,7 @@ Preconditions: 从 Launch 的空隔离目录和生成夹具开始。
 - 执行：`python3 .agents/skills/verify-reader/scripts/verify.py ui`，检查日志中的 `production_pdf_navigation_zoom、production_pdf_bookmarks_and_focused_viewer_share_navigation` 全部通过。
 - 动作：打开 sample.pdf，点击 next、toolbar-fit-page、toolbar-fit-width；settings 内点击 pdf-zoom-plus；拖选并复制；关闭重开。
 - 结果：页码变化、缩放生效、复制内容正确，重开恢复页码；书签跳转与页码同步。
+- 空书签：运行 `production_bookmarks_hide_unresolved_entries_and_show_empty_state`，确认无效条目隐藏、无有效条目时显示“这本书没有可跳转的书签”，Escape 关闭后焦点返回书签按钮。
 - 涉及磁盘结果时执行 `python3 .agents/skills/verify-reader/scripts/verify.py integration`；原生窗口证据使用 `native`。
 
 ## 选中翻译
