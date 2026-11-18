@@ -10,6 +10,7 @@ keywords = ["gpui", "pdf", "viewer", "hayro", "acroform"]
 categories = ["gui", "rendering"]
 
 [dependencies]
+async-channel = "2.5"
 # Shared workspace spec (the root pins the rev) so Cargo unifies to one gpui.
 gpui = { workspace = true }
 

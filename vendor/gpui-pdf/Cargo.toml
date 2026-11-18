@@ -64,6 +64,9 @@ name = "forms_check"
 path = "examples/forms_check.rs"
 required-features = ["forms"]
 
+[dependencies.async-channel]
+version = "2.5"
+
 [dependencies.gpui]
 version = "0.3"
 package = "gpui-pre"

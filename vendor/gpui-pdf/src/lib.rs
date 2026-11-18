@@ -43,9 +43,11 @@ use gpui::{
 // Only the forms layer maps field rects to window space.
 #[cfg(feature = "forms")]
 use gpui::{Bounds, Pixels};
-use hayro::hayro_interpret::InterpreterSettings;
 use hayro::hayro_syntax::{DecryptionError, LoadPdfError, Pdf};
-use image::{Frame, RgbaImage};
+
+mod raster;
+pub use raster::render_page;
+use raster::{RasterReceiver, RasterRequest};
 
 #[cfg(feature = "markup")]
 use gpui::{MouseMoveEvent, deferred};
@@ -147,39 +149,6 @@ fn prepare(bytes: Arc<Vec<u8>>, password: &str) -> Result<Prepared, LoadError> {
 /// viewer can lay out correctly-sized page slots before any page renders.
 pub fn page_dims(doc: &Document) -> Vec<(f32, f32)> {
     doc.pages().iter().map(|p| p.render_dimensions()).collect()
-}
-
-/// Rasterize a single page (0-based) of an already-parsed [`Document`] at `scale`
-/// (PDF point-size × this) to a BGRA `RenderImage` composited onto white. Higher
-/// scale = sharper but more memory; [`PdfView`] picks `scale` from the display's
-/// pixel ratio, zoom, and quality so pages are crisp without wasting memory.
-pub fn render_page(doc: &Document, idx: usize, scale: f32) -> Result<Arc<RenderImage>, String> {
-    let pixmaps = hayro::render_pdf(doc, scale, InterpreterSettings::default(), Some(idx..=idx))
-        .ok_or_else(|| format!("render page {idx}"))?;
-    let pixmap = pixmaps
-        .into_iter()
-        .next()
-        .ok_or_else(|| format!("no page {idx}"))?;
-
-    let (w, h) = (u32::from(pixmap.width()), u32::from(pixmap.height()));
-    let src = pixmap.data_as_u8_slice(); // premultiplied RGBA8, row-major
-    let mut bgra = vec![0u8; src.len()];
-    for (out, p) in bgra
-        .as_chunks_mut::<4>()
-        .0
-        .iter_mut()
-        .zip(src.as_chunks::<4>().0)
-    {
-        // Composite premultiplied src over white (out = src + 255-a; src ≤ a so no
-        // overflow), then RGBA→BGRA (gpui's RenderImage is BGRA).
-        let add = 255 - p[3];
-        out[0] = p[2].saturating_add(add); // B
-        out[1] = p[1].saturating_add(add); // G
-        out[2] = p[0].saturating_add(add); // R
-        out[3] = 255;
-    }
-    let buf = RgbaImage::from_raw(w, h, bgra).ok_or_else(|| "bad pixel buffer".to_string())?;
-    Ok(Arc::new(RenderImage::new(vec![Frame::new(buf)])))
 }
 
 /// True if a link/image `src` points at a PDF (by extension, case-insensitive).
@@ -350,7 +319,7 @@ const MAX_RENDER_SCALE: f32 = 4.0;
 /// A page's render state. The bitmap is kept while a re-render (zoom / quality
 /// change) is in flight, so the page never blanks — gpui rescales the old bitmap
 /// until the crisp one lands.
-#[derive(Default, Clone)]
+#[derive(Default)]
 struct Slot {
     /// Last rasterized bitmap (may be a stale scale during a re-render); shown scaled
     /// meanwhile. `None` when never rendered or evicted.
@@ -358,8 +327,22 @@ struct Slot {
     /// Generation `image` was rendered at; if it differs from the view's generation,
     /// the bitmap is stale and the page is re-rendered (while still shown).
     image_gen: u64,
-    /// A background rasterization is in flight (don't spawn another).
-    loading: bool,
+    raster: Option<RasterRequest>,
+}
+
+impl Slot {
+    fn take_raster(&mut self, result: &RasterReceiver) -> bool {
+        if self
+            .raster
+            .as_ref()
+            .is_some_and(|raster| raster.matches(result))
+        {
+            self.raster = None;
+            true
+        } else {
+            false
+        }
+    }
 }
 
 /// Colors for the [`PdfView`] chrome. Map your theme onto this; [`PdfStyle::default`]
@@ -537,6 +520,7 @@ pub struct PdfView {
     /// The parsed PDF (shared with the background render tasks); `None` until the
     /// off-thread load finishes.
     pdf: Option<Arc<Document>>,
+    replacement: Option<gpui::Task<()>>,
     /// The raw file bytes, kept so an encrypted PDF can be retried with a password
     /// without re-reading the file. `None` until the load reads them.
     bytes: Option<Arc<Vec<u8>>>,
@@ -715,6 +699,7 @@ impl PdfView {
             style,
             quality,
             pdf: None,
+            replacement: None,
             bytes: None,
             locked: false,
             unlock_failed: false,
@@ -783,6 +768,7 @@ impl PdfView {
     /// [`PdfView::replace_bytes`].
     fn install_document(&mut self, prepared: Prepared, cx: &mut Context<Self>) {
         let n = prepared.dims.len();
+        self.invalidate_rasters();
         self.pdf = Some(prepared.doc);
         self.dims = prepared.dims;
         self.outline = prepared.toc;
@@ -797,17 +783,13 @@ impl PdfView {
         // stale page paints until its crisp replacement lands, the same
         // no-blanking swap zoom and quality changes use (blanking every slot
         // flashed the whole viewer black on each form-field write).
-        if self.pages.len() == n {
-            self.generation += 1;
-            for slot in &mut self.pages {
-                slot.loading = false;
-            }
-        } else {
-            for slot in std::mem::replace(&mut self.pages, vec![Slot::default(); n]) {
+        if self.pages.len() != n {
+            for slot in std::mem::take(&mut self.pages) {
                 if let Some(arc) = slot.image {
                     self.pending_drops.push(arc);
                 }
             }
+            self.pages.resize_with(n, Slot::default);
         }
         // Stale text layers would locate highlights against the old bytes.
         #[cfg(feature = "markup")]
@@ -909,17 +891,23 @@ impl PdfView {
     pub fn replace_bytes(&mut self, bytes: Vec<u8>, cx: &mut Context<Self>) {
         let bytes = Arc::new(bytes);
         self.bytes = Some(bytes.clone());
-        cx.spawn(async move |this, cx| {
+        self.cancel_rasters();
+        self.replacement = Some(cx.spawn(async move |this, cx| {
             let prepared = cx
                 .background_executor()
                 .spawn(async move { prepare(bytes, "") })
                 .await;
-            let _ = this.update(cx, |this, cx| match prepared {
-                Ok(p) => this.install_document(p, cx),
-                Err(e) => log::error!("replace pdf bytes: {e:?}"),
+            let _ = this.update(cx, |this, cx| {
+                this.replacement = None;
+                match prepared {
+                    Ok(p) => this.install_document(p, cx),
+                    Err(e) => {
+                        log::error!("replace pdf bytes: {e:?}");
+                        cx.notify();
+                    }
+                }
             });
-        })
-        .detach();
+        }));
     }
 
     /// Whether the PDF is encrypted and awaiting a password — the host should show a
@@ -1378,6 +1366,8 @@ impl PdfView {
     /// paint and only frees it via `drop_image`; a raw `ImageSource::Render` is never
     /// auto-evicted, so call this before dropping the view or the textures leak.
     pub fn release(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.replacement = None;
+        self.cancel_rasters();
         for arc in std::mem::take(&mut self.pending_drops) {
             cx.drop_image(arc, Some(window));
         }
@@ -1420,11 +1410,22 @@ impl PdfView {
         }
         let anchor = self.viewport();
         self.zoom = z;
-        self.generation = self.generation.wrapping_add(1);
+        self.invalidate_rasters();
         if self.restore.is_none() {
             self.restore = Some(anchor);
         }
         cx.notify();
+    }
+
+    fn cancel_rasters(&mut self) {
+        for slot in &mut self.pages {
+            slot.raster = None;
+        }
+    }
+
+    fn invalidate_rasters(&mut self) {
+        self.cancel_rasters();
+        self.generation = self.generation.wrapping_add(1);
     }
 
     /// Fit the page column to the viewport width. Sticky: re-fits as the
@@ -1617,7 +1618,7 @@ impl PdfView {
         let quality = (self.quality)().clamp(MIN_QUALITY, MAX_QUALITY);
         if (quality - self.last_quality).abs() > 0.01 {
             self.last_quality = quality;
-            self.generation = self.generation.wrapping_add(1);
+            self.invalidate_rasters();
         }
 
         let page_width = self.page_width();
@@ -1662,13 +1663,17 @@ impl PdfView {
         for (i, slot) in self.pages.iter_mut().enumerate() {
             let in_window = i >= start && i <= end;
             if in_window {
-                if !slot.loading && (slot.image.is_none() || slot.image_gen != generation) {
-                    slot.loading = true;
+                if self.replacement.is_none()
+                    && slot.raster.is_none()
+                    && (slot.image.is_none() || slot.image_gen != generation)
+                {
                     to_render.push(i);
                 }
-            } else if let Some(arc) = slot.image.take() {
-                slot.image_gen = 0;
-                to_evict.push(arc);
+            } else {
+                slot.raster = None;
+                if let Some(arc) = slot.image.take() {
+                    to_evict.push(arc);
+                }
             }
         }
         for arc in to_evict {
@@ -1680,45 +1685,41 @@ impl PdfView {
 
         // Render the pages closest to the middle of the window first, so the page
         // you're looking at fills in before its neighbors.
-        let center = (start + end) / 2;
-        to_render.sort_by_key(|&i| (i as i64 - center as i64).unsigned_abs());
+        let center = current_page(&self.dims, page_width, scroll_y + viewport_h * 0.5);
+        to_render.sort_by_key(|&i| i.abs_diff(center));
 
-        let pdf = self.pdf.clone().unwrap();
+        let pdf = self.pdf.as_ref().unwrap();
         for i in to_render {
-            let pdf = pdf.clone();
             let scale = render_scale(page_width, scale_factor, quality, self.dims[i].0);
+            let request = RasterRequest::queue(pdf, i, scale);
+            let result = request.receiver();
+            self.pages[i].raster = Some(request);
             cx.spawn(async move |this, cx| {
-                let page = cx
-                    .background_executor()
-                    .spawn(async move { render_page(&pdf, i, scale).ok() })
-                    .await;
+                let image = result.recv().await.ok().flatten();
                 let _ = this.update(cx, |this, cx| {
-                    // Store only if still wanted: same generation (scale unchanged)
-                    // and still inside the viewport window. Otherwise discard — the
-                    // bitmap was never painted, so it holds no atlas texture.
-                    let in_window = {
-                        let pw = this.page_width();
-                        let sy = f32::from(-this.scroll.offset().y);
-                        let vh = f32::from(this.scroll.bounds().size.height);
-                        let (s, e) = keep_window(&this.dims, pw, sy, vh);
-                        i >= s && i <= e
-                    };
-                    let gen_now = this.generation;
-                    let mut retired = None;
-                    if let Some(slot) = this.pages.get_mut(i) {
-                        slot.loading = false;
-                        if gen_now == generation
-                            && in_window
-                            && let Some(img) = page
-                        {
-                            retired = slot.image.replace(img);
-                            slot.image_gen = generation;
-                        }
+                    if !this
+                        .pages
+                        .get_mut(i)
+                        .is_some_and(|slot| slot.take_raster(&result))
+                    {
+                        return;
                     }
-                    // The replaced bitmap was painted, so its atlas texture must be
-                    // freed — defer to the next `ensure_window` (which has a Window).
-                    if let Some(old) = retired {
-                        this.pending_drops.push(old);
+                    let Some(image) = image else {
+                        return;
+                    };
+                    let (start, end) = keep_window(
+                        &this.dims,
+                        this.page_width(),
+                        f32::from(-this.scroll.offset().y),
+                        f32::from(this.scroll.bounds().size.height),
+                    );
+                    if !(start..=end).contains(&i) {
+                        return;
+                    }
+                    let slot = &mut this.pages[i];
+                    slot.image_gen = generation;
+                    if let Some(retired) = slot.image.replace(image) {
+                        this.pending_drops.push(retired);
                     }
                     cx.notify();
                 });

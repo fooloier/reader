@@ -1124,6 +1124,7 @@ dependencies = [
 name = "gpui-pdf"
 version = "0.7.0"
 dependencies = [
+ "async-channel",
  "gpui-pre",
  "hayro",
  "image",
