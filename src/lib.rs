@@ -8,3 +8,6 @@ mod toolbar;
 
 #[cfg(all(test, feature = "test-support"))]
 mod ui_tests;
+
+#[cfg(all(test, feature = "test-support"))]
+mod offscreen_tests;

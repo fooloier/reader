@@ -19,7 +19,7 @@ Preconditions: 从 Launch 的空隔离目录和生成夹具开始。
 - 动作：打开 sample.epub 或 realistic.epub；拖选正文并复制；点击 toc、next、font-size-plus；关闭 close-{id} 后重新打开。
 - 结果：拖选复制得到非空正文；章节与书签同步；排版变化；重新打开恢复锚点；空章节正常显示。
 - 空书签：运行 `production_bookmarks_hide_unresolved_entries_and_show_empty_state`，确认无效条目隐藏、无有效条目时显示“这本书没有可跳转的书签”，Escape 关闭后焦点返回书签按钮。
-- 涉及磁盘结果时执行 `python3 .agents/skills/verify-reader/scripts/verify.py integration`；原生窗口证据使用 `native`。
+- 涉及磁盘结果时执行 `python3 .agents/skills/verify-reader/scripts/verify.py integration`；离屏截图使用 `native`。
 
 ## 选中翻译
 

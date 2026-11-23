@@ -27,7 +27,8 @@ def main():
         command = ['python3', 'tests/native_smoke.py'] if mode == 'native' else ['python3', 'tests/run.py', mode, '--skip-build']
         (evidence / 'command.txt').write_text(' '.join(command) + '\n')
         (evidence / 'revision.txt').write_bytes(subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT))
-        (evidence / 'ui-source.rs').write_bytes((ROOT / 'src/ui_tests.rs').read_bytes())
+        source = 'offscreen_tests.rs' if mode == 'native' else 'ui_tests.rs'
+        (evidence / ('offscreen-source.rs' if mode == 'native' else 'ui-source.rs')).write_bytes((ROOT / 'src' / source).read_bytes())
         started = datetime.datetime.now().timestamp()
         try:
             with (evidence / 'transcript.log').open('w') as log:

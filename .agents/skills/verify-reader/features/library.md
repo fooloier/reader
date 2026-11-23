@@ -20,7 +20,7 @@ Preconditions: 从 Launch 的空隔离目录和生成夹具开始。
 - 结果：导入成功和失败统计可见；取消保留书籍；确认删除移除书籍与打开标签；源文件完整。
 - 重命名失败：运行 `production_failed_rename_keeps_latest_position_and_original`，在隔离目录制造目标路径冲突后尝试改名，确认失败提示、原托管文件保留，以及关闭重开后最新阅读位置仍在。
 - 状态消息：运行 `production_status_dismissal_keeps_import_running_and_supports_keyboard` 和 `production_status_expiry_restarts_for_replacement_and_identical_messages`，验证点击和 Tab/Enter 关闭、后台导入继续执行、消息替换及重复消息重新计时。
-- 涉及磁盘结果时执行 `python3 .agents/skills/verify-reader/scripts/verify.py integration`；原生窗口证据使用 `native`。
+- 涉及磁盘结果时执行 `python3 .agents/skills/verify-reader/scripts/verify.py integration`；离屏截图使用 `native`。
 
 ## Gotchas
 
