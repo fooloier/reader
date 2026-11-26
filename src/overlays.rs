@@ -258,11 +258,6 @@ impl ReaderApp {
                             .child("这本书没有可跳转的书签"),
                     ))
                 })))
-                .footer(
-                    div()
-                        .text_sm()
-                        .child("书签来自书内目录；本版本不创建个人书签。"),
-                )
                 .on_close(move |_, _, cx| {
                     let _ = owner.update(cx, |this, cx| {
                         this.overlay = None;
